@@ -19,7 +19,7 @@ jobs:
     needs: [Test]
     runs-on: ${{ matrix.runner }}
     env:
-      PROJECT_NAME: rust-actions-example
+      PROJECT_NAME: candid-language-server
     strategy:
       fail-fast: false
       matrix:
