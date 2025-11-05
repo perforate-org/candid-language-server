@@ -13,7 +13,7 @@ const STRING_DELIMITER: SemanticTokenType = SemanticTokenType::new("stringDelimi
 
 macro_rules! legend_count {
     ($($token:expr),+ $(,)?) => {
-        <[()]>::len(&[$({ stringify!($token); () }),*])
+        <[()]>::len(&[$({ stringify!($token); }),*])
     };
 }
 
