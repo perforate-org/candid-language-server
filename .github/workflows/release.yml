@@ -28,30 +28,37 @@ jobs:
             extension: ""
             runner: ubuntu-latest
             cross: true
+            archive_extension: ".tar.gz"
           - target: x86_64-pc-windows-msvc
             extension: ".exe"
             runner: windows-latest
             cross: false
+            archive_extension: ".zip"
           - target: x86_64-apple-darwin
             extension: ""
             runner: macos-latest
             cross: false
+            archive_extension: ".tar.gz"
           - target: aarch64-unknown-linux-gnu
             extension: ""
             runner: ubuntu-latest
             cross: true
+            archive_extension: ".tar.gz"
           - target: aarch64-pc-windows-msvc
             extension: ".exe"
             runner: windows-latest
             cross: false
+            archive_extension: ".zip"
           - target: aarch64-apple-darwin
             extension: ""
             runner: macos-latest
             cross: false
+            archive_extension: ".tar.gz"
           - target: armv7-unknown-linux-gnueabihf
             extension: ""
             runner: ubuntu-latest
             cross: true
+            archive_extension: ".tar.gz"
 
     steps:
       - name: Checkout
@@ -80,10 +87,30 @@ jobs:
           rustup target add ${{ matrix.target }}
           cargo build --release --target ${{ matrix.target }} --verbose
 
-      - name: Rename Artifacts
+      - name: Package Artifact (Windows)
+        if: ${{ matrix.runner == 'windows-latest' }}
+        shell: pwsh
+        run: |
+          $BinaryPath = "target/${{ matrix.target }}/release/${{ env.PROJECT_NAME }}${{ matrix.extension }}"
+          $DistDir = "dist"
+          New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
+          Copy-Item $BinaryPath "$DistDir/candid-language-server${{ matrix.extension }}" -Force
+          $ArchivePath = "target/${{ matrix.target }}/release/${{ env.PROJECT_NAME }}-${{ github.ref_name }}-${{ matrix.target }}${{ matrix.archive_extension }}"
+          if (Test-Path $ArchivePath) { Remove-Item $ArchivePath }
+          Compress-Archive -Path "$DistDir/candid-language-server${{ matrix.extension }}" -DestinationPath $ArchivePath
+          Remove-Item "$DistDir/candid-language-server${{ matrix.extension }}"
+
+      - name: Package Artifact (Unix)
+        if: ${{ matrix.runner != 'windows-latest' }}
         shell: bash
         run: |
-          mv target/${{ matrix.target }}/release/${{ env.PROJECT_NAME }}{,-${{ github.ref_name }}-${{ matrix.target }}${{ matrix.extension }}}
+          binary="target/${{ matrix.target }}/release/${{ env.PROJECT_NAME }}${{ matrix.extension }}"
+          dist="dist"
+          mkdir -p "$dist"
+          cp "$binary" "$dist/candid-language-server${{ matrix.extension }}"
+          archive="target/${{ matrix.target }}/release/${{ env.PROJECT_NAME }}-${{ github.ref_name }}-${{ matrix.target }}${{ matrix.archive_extension }}"
+          tar -C "$dist" -czf "$archive" "candid-language-server${{ matrix.extension }}"
+          rm "$dist/candid-language-server${{ matrix.extension }}"
 
       - name: Release Artifacts
         uses: softprops/action-gh-release@v2
@@ -91,4 +118,4 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           files: |
-            target/${{ matrix.target }}/release/${{ env.PROJECT_NAME }}-${{ github.ref_name }}-${{ matrix.target }}${{ matrix.extension }}
+            target/${{ matrix.target }}/release/${{ env.PROJECT_NAME }}-${{ github.ref_name }}-${{ matrix.target }}${{ matrix.archive_extension }}
