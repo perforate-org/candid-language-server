@@ -17,52 +17,47 @@ macro_rules! legend_count {
     };
 }
 
-macro_rules! legend_idx_lookup {
-    ($needle:expr; $idx:expr; $head:expr, $($tail:expr),+) => {
-        if $needle == $head.as_str() {
-            $idx
-        } else {
-            legend_idx_lookup!($needle; $idx + 1usize; $($tail),+)
-        }
-    };
-    ($needle:expr; $idx:expr; $head:expr) => {
-        if $needle == $head.as_str() {
-            $idx
-        } else {
-            panic!("legend missing entry for {}", $needle)
-        }
-    };
-}
-
 macro_rules! define_legend {
-    ($($token:expr),+ $(,)?) => {
+    ($($variant:ident => $token:expr),+ $(,)?) => {
+        #[repr(usize)]
+        #[derive(Copy, Clone)]
+        enum LegendIdx {
+            $( $variant, )+
+        }
+
+        impl LegendIdx {
+            #[inline]
+            const fn idx(self) -> usize {
+                self as usize
+            }
+        }
+
         /// Ordered legend exposed to the LSP client so it can decode semantic tokens we emit.
         pub const LEGEND_TYPES: &[SemanticTokenType; legend_count!($($token),+)] = &[
             $($token),*
         ];
 
-        /// Resolve the legend index for a given semantic-token type, panicking if the legend is stale.
         #[inline]
-        fn idx(token_type: &SemanticTokenType) -> usize {
-            let needle = token_type.as_str();
-            legend_idx_lookup!(needle; 0usize; $($token),+)
+        fn idx(kind: LegendIdx) -> usize {
+            kind.idx()
         }
     };
 }
 
+// Keep the enum, legend order, and match arms synchronized via a single macro invocation.
 define_legend!(
-    SemanticTokenType::COMMENT,
-    COMMENT_DELIMITER,
-    SemanticTokenType::KEYWORD,
-    SemanticTokenType::TYPE,
-    CONSTANT,
-    SemanticTokenType::NUMBER,
-    SemanticTokenType::STRING,
-    STRING_DELIMITER,
-    SemanticTokenType::OPERATOR,
-    PUNCTUATION_BRACKET,
-    PUNCTUATION_DELIMITER,
-    IDENTIFIER,
+    Comment => SemanticTokenType::COMMENT,
+    CommentDelimiter => COMMENT_DELIMITER,
+    Keyword => SemanticTokenType::KEYWORD,
+    Type => SemanticTokenType::TYPE,
+    Constant => CONSTANT,
+    Number => SemanticTokenType::NUMBER,
+    String => SemanticTokenType::STRING,
+    StringDelimiter => STRING_DELIMITER,
+    Operator => SemanticTokenType::OPERATOR,
+    PunctuationBracket => PUNCTUATION_BRACKET,
+    PunctuationDelimiter => PUNCTUATION_DELIMITER,
+    Identifier => IDENTIFIER,
 );
 
 /// Translate a lexed `Token` into the semantic-token index expected by the LSP legend.
@@ -70,8 +65,8 @@ define_legend!(
 pub fn semantic_token_type_index(token: &Token) -> usize {
     match token {
         // Comment
-        Token::LineComment => idx(&SemanticTokenType::COMMENT),
-        Token::StartComment => idx(&COMMENT_DELIMITER),
+        Token::LineComment => idx(LegendIdx::Comment),
+        Token::StartComment => idx(LegendIdx::CommentDelimiter),
 
         // Keyword
         Token::Vec
@@ -84,33 +79,35 @@ pub fn semantic_token_type_index(token: &Token) -> usize {
         | Token::CompositeQuery
         | Token::Type
         | Token::Import
-        | Token::Opt => idx(&SemanticTokenType::KEYWORD),
+        | Token::Opt => idx(LegendIdx::Keyword),
 
         // Type
-        Token::Blob | Token::Principal => idx(&SemanticTokenType::TYPE),
+        Token::Blob | Token::Principal => idx(LegendIdx::Type),
 
         // Constant
-        Token::Null | Token::Boolean(_) => idx(&CONSTANT),
+        Token::Null | Token::Boolean(_) => idx(LegendIdx::Constant),
 
         // Number
-        Token::Decimal(_) | Token::Hex(_) | Token::Float(_) => idx(&SemanticTokenType::NUMBER),
+        Token::Decimal(_) | Token::Hex(_) | Token::Float(_) => idx(LegendIdx::Number),
 
         // String
-        Token::Text(_) => idx(&SemanticTokenType::STRING),
-        Token::StartString => idx(&STRING_DELIMITER),
+        Token::Text(_) => idx(LegendIdx::String),
+        Token::StartString => idx(LegendIdx::StringDelimiter),
 
         // Operator
         Token::Equals | Token::TestEqual | Token::NotEqual | Token::NotDecode | Token::Sign(_) => {
-            idx(&SemanticTokenType::OPERATOR)
+            idx(LegendIdx::Operator)
         }
 
         // Punctuation
-        Token::LParen | Token::RParen | Token::LBrace | Token::RBrace => idx(&PUNCTUATION_BRACKET),
+        Token::LParen | Token::RParen | Token::LBrace | Token::RBrace => {
+            idx(LegendIdx::PunctuationBracket)
+        }
         Token::Comma | Token::Semi | Token::Colon | Token::Dot | Token::Arrow => {
-            idx(&PUNCTUATION_DELIMITER)
+            idx(LegendIdx::PunctuationDelimiter)
         }
 
         // Identifier
-        Token::Id(_) => idx(&IDENTIFIER),
+        Token::Id(_) => idx(LegendIdx::Identifier),
     }
 }

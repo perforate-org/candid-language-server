@@ -57,7 +57,7 @@ pub fn parse(src: &str) -> ParserResult {
     let ast = match src.parse::<IDLProg>() {
         Ok(ast) => Some(ast),
         Err(err) => {
-            // user error duplicates a token error
+            // user error duplicates a lexer error
             if !matches!(
                 &err,
                 candid_parser::Error::Parse(lalrpop_util::ParseError::User { .. })
