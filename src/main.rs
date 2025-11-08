@@ -1,6 +1,4 @@
-use candid_language_server::lsp::CandidLanguageServer;
-use dashmap::DashMap;
-use rapidhash::fast::RandomState;
+use candid_language_server::CandidLanguageServer;
 use tower_lsp_server::{LspService, Server};
 
 #[tokio::main]
@@ -10,16 +8,8 @@ async fn main() {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
-    let random_state = RandomState::new();
-
-    let (service, socket) = LspService::build(|client| CandidLanguageServer {
-        client,
-        ast_map: DashMap::with_hasher(random_state),
-        document_map: DashMap::with_hasher(random_state),
-        semantic_token_map: DashMap::with_hasher(random_state),
-        semantic_map: DashMap::with_hasher(random_state),
-    })
-    .finish();
+    let (service, socket) =
+        LspService::build(CandidLanguageServer::new).finish();
 
     Server::new(stdin, stdout, socket).serve(service).await;
 }

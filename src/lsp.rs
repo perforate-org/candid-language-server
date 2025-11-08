@@ -220,6 +220,21 @@ struct TextDocumentItem<'a> {
     version: Option<i32>,
 }
 
+impl CandidLanguageServer {
+    /// Create a new instance of the CandidLanguageServer.
+    pub fn new(client: Client) -> Self {
+        let hasher = RandomState::new();
+
+        Self {
+            client,
+            ast_map: DashMap::with_hasher(hasher),
+            semantic_map: DashMap::with_hasher(hasher),
+            semantic_token_map: DashMap::with_hasher(hasher),
+            document_map: DashMap::with_hasher(hasher),
+        }
+    }
+}
+
 impl<'a> CandidLanguageServer {
     async fn on_change(&self, params: &TextDocumentItem<'a>) {
         let uri_key = params.uri.to_string();

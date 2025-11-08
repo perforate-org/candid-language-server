@@ -9,14 +9,13 @@ const PUNCTUATION_BRACKET: SemanticTokenType = SemanticTokenType::new("punctuati
 const PUNCTUATION_DELIMITER: SemanticTokenType = SemanticTokenType::new("punctuationDelimiter");
 const STRING_DELIMITER: SemanticTokenType = SemanticTokenType::new("stringDelimiter");
 
-// Keep the legend array and index lookup in sync by expanding both from the same list of tokens.
-
 macro_rules! legend_count {
     ($($token:expr),+ $(,)?) => {
         <[()]>::len(&[$({ stringify!($token); }),*])
     };
 }
 
+/// Keep the enum, legend order, and match arms synchronized via a single macro invocation.
 macro_rules! define_legend {
     ($($variant:ident => $token:expr),+ $(,)?) => {
         #[repr(usize)]
@@ -44,7 +43,6 @@ macro_rules! define_legend {
     };
 }
 
-// Keep the enum, legend order, and match arms synchronized via a single macro invocation.
 define_legend!(
     Comment => SemanticTokenType::COMMENT,
     CommentDelimiter => COMMENT_DELIMITER,
