@@ -2,9 +2,8 @@ use crate::lsp::{
     span::Span,
     symbol_table::{ImportKind, ReferenceId, SymbolId, SymbolTable},
 };
-use candid_parser::{
-    IDLProg,
-    syntax::{Binding, Dec, IDLActorType, IDLType, IDLTypeKind, TypeField},
+use candid_parser::syntax::spanned::{
+    Binding, Dec, IDLActorType, IDLProg, IDLType, IDLTypeKind, TypeField,
 };
 use rust_lapper::{Interval, Lapper};
 use thiserror::Error;

@@ -7,8 +7,8 @@ use crate::{
     },
 };
 use candid_parser::{
-    IDLProg,
     candid::{Error as CandidCoreError, error::Label as CandidLabel},
+    syntax::spanned::IDLProg,
     token::{LexicalError, Token},
 };
 use dashmap::DashMap;
@@ -16,7 +16,7 @@ use lalrpop_util::ParseError;
 use log::debug;
 use rapidhash::fast::RandomState;
 use ropey::Rope;
-use std::{error::Error as StdError, fmt::Write};
+use std::{borrow::Cow, error::Error as StdError, fmt::Write};
 use tower_lsp_server::{
     Client, LanguageServer,
     jsonrpc::Result,
@@ -103,10 +103,14 @@ impl LanguageServer for CandidLanguageServer {
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         debug!("file opened");
-        self.on_change(&TextDocumentItem {
-            uri: params.text_document.uri,
-            text: &params.text_document.text,
-            version: Some(params.text_document.version),
+        let text_document = params.text_document;
+        let text = text_document.text;
+        let rope = Rope::from_str(&text);
+        self.on_change(TextDocumentItem {
+            uri: text_document.uri,
+            rope,
+            text: Cow::Owned(text),
+            version: Some(text_document.version),
         })
         .await
     }
@@ -127,36 +131,38 @@ impl LanguageServer for CandidLanguageServer {
             .unwrap_or_default();
 
         for change in content_changes {
-            if change.range.is_none() {
-                rope = Rope::from_str(&change.text);
-                continue;
+            let TextDocumentContentChangeEvent { range, text, .. } = change;
+
+            match range {
+                None => {
+                    rope = Rope::from_str(&text);
+                }
+                Some(range) => {
+                    let mut start_offset =
+                        position_to_offset(range.start, &rope).unwrap_or_else(|| rope.len_chars());
+                    let mut end_offset =
+                        position_to_offset(range.end, &rope).unwrap_or(start_offset);
+
+                    let doc_len = rope.len_chars();
+                    start_offset = start_offset.min(doc_len);
+                    end_offset = end_offset.min(doc_len);
+
+                    if end_offset < start_offset {
+                        continue;
+                    }
+
+                    rope.remove(start_offset..end_offset);
+                    rope.insert(start_offset, &text);
+                }
             }
-
-            let Some(range) = change.range else {
-                continue;
-            };
-
-            let mut start_offset =
-                position_to_offset(range.start, &rope).unwrap_or_else(|| rope.len_chars());
-            let mut end_offset = position_to_offset(range.end, &rope).unwrap_or(start_offset);
-
-            let doc_len = rope.len_chars();
-            start_offset = start_offset.min(doc_len);
-            end_offset = end_offset.min(doc_len);
-
-            if end_offset < start_offset {
-                continue;
-            }
-
-            rope.remove(start_offset..end_offset);
-            rope.insert(start_offset, &change.text);
         }
 
         let text = rope.to_string();
 
-        self.on_change(&TextDocumentItem {
+        self.on_change(TextDocumentItem {
             uri,
-            text: &text,
+            rope,
+            text: Cow::Owned(text),
             version,
         })
         .await
@@ -167,10 +173,11 @@ impl LanguageServer for CandidLanguageServer {
         if let Some(text) = params.text {
             let item = TextDocumentItem {
                 uri: params.text_document.uri,
-                text: &text,
+                rope: Rope::from_str(&text),
+                text: Cow::Owned(text),
                 version: None,
             };
-            self.on_change(&item).await;
+            self.on_change(item).await;
             _ = self.client.semantic_tokens_refresh().await;
         }
         debug!("file saved!");
@@ -216,7 +223,8 @@ impl Notification for CustomNotification {
 
 struct TextDocumentItem<'a> {
     uri: Uri,
-    text: &'a str,
+    rope: Rope,
+    text: Cow<'a, str>,
     version: Option<i32>,
 }
 
@@ -235,10 +243,15 @@ impl CandidLanguageServer {
     }
 }
 
-impl<'a> CandidLanguageServer {
-    async fn on_change(&self, params: &TextDocumentItem<'a>) {
-        let uri_key = params.uri.to_string();
-        let rope = ropey::Rope::from_str(params.text);
+impl CandidLanguageServer {
+    async fn on_change(&self, params: TextDocumentItem<'_>) {
+        let TextDocumentItem {
+            uri,
+            rope,
+            text,
+            version,
+        } = params;
+        let uri_key = uri.to_string();
 
         self.document_map.insert(uri_key.clone(), rope.clone());
 
@@ -246,7 +259,7 @@ impl<'a> CandidLanguageServer {
             ast,
             parse_errors,
             semantic_tokens,
-        } = parse(params.text);
+        } = parse(&text);
 
         let mut diagnostics = Vec::with_capacity(parse_errors.len());
         for item in parse_errors {
@@ -330,7 +343,7 @@ impl<'a> CandidLanguageServer {
         }
 
         self.client
-            .publish_diagnostics(params.uri.clone(), diagnostics, params.version)
+            .publish_diagnostics(uri.clone(), diagnostics, version)
             .await;
         self.semantic_token_map.insert(uri_key, semantic_tokens);
     }
