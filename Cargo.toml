@@ -1,6 +1,6 @@
 [package]
 name = "candid-language-server"
-version = "0.0.1-experimental.1"
+version = "0.0.1-experimental.6"
 edition = "2024"
 publish = false
 license = "Apache-2.0 or MIT"
