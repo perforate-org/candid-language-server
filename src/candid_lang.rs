@@ -1,6 +1,6 @@
 use crate::lsp::semantic_token::semantic_token_type_index;
 use candid_parser::{
-    syntax::spanned::IDLProg,
+    syntax::IDLProg,
     token::{LexicalError, Token, Tokenizer, TriviaMap},
 };
 use lalrpop_util::ParseError;

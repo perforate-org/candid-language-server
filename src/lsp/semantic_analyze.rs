@@ -2,8 +2,8 @@ use crate::lsp::{
     span::Span,
     symbol_table::{ImportKind, ReferenceId, SymbolId, SymbolTable},
 };
-use candid_parser::syntax::spanned::{
-    Binding, Dec, IDLActorType, IDLProg, IDLType, IDLTypeKind, TypeField,
+use candid_parser::syntax::{
+    Binding, Dec, IDLActorType, IDLProg, IDLType, IDLTypeWithSpan, TypeField,
 };
 use rust_lapper::{Interval, Lapper};
 use thiserror::Error;
@@ -129,15 +129,15 @@ fn analyze_binding(binding: &Binding, ctx: &mut Ctx) -> Result<()> {
     analyze_type(&binding.typ, ctx)
 }
 
-fn analyze_type(idl_type: &IDLType, ctx: &mut Ctx) -> Result<()> {
+fn analyze_type(idl_type: &IDLTypeWithSpan, ctx: &mut Ctx) -> Result<()> {
     match &idl_type.kind {
-        IDLTypeKind::PrimT(_) | IDLTypeKind::PrincipalT => {}
-        IDLTypeKind::VarT(name) => {
+        IDLType::PrimT(_) | IDLType::PrincipalT => {}
+        IDLType::VarT(name) => {
             let span = match ctx.find_symbol(name) {
                 Some(span) => span,
                 None => {
                     return Err(SemanticError::UndefinedVariable {
-                        name: name.clone(),
+                        name: name.to_owned(),
                         span: idl_type.span.clone(),
                     });
                 }
@@ -147,7 +147,7 @@ fn analyze_type(idl_type: &IDLType, ctx: &mut Ctx) -> Result<()> {
                     .add_reference(idl_type.span.clone(), Some(symbol_id));
             }
         }
-        IDLTypeKind::FuncT(func_type) => {
+        IDLType::FuncT(func_type) => {
             for arg in func_type.args.iter() {
                 analyze_type(arg, ctx)?;
             }
@@ -155,18 +155,18 @@ fn analyze_type(idl_type: &IDLType, ctx: &mut Ctx) -> Result<()> {
                 analyze_type(ret, ctx)?;
             }
         }
-        IDLTypeKind::OptT(inner) | IDLTypeKind::VecT(inner) => {
+        IDLType::OptT(inner) | IDLType::VecT(inner) => {
             analyze_type(inner, ctx)?;
         }
-        IDLTypeKind::RecordT(type_fields) | IDLTypeKind::VariantT(type_fields) => {
+        IDLType::RecordT(type_fields) | IDLType::VariantT(type_fields) => {
             analyze_type_fields(type_fields, ctx)?;
         }
-        IDLTypeKind::ServT(bindings) => {
+        IDLType::ServT(bindings) => {
             for binding in bindings.iter() {
                 analyze_binding(binding, ctx)?;
             }
         }
-        IDLTypeKind::ClassT(args, ret) => {
+        IDLType::ClassT(args, ret) => {
             for arg in args.iter() {
                 analyze_type(arg, ctx)?;
             }

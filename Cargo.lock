@@ -212,7 +212,7 @@ checksum = "d71b6127be86fdcfddb610f7182ac57211d4b18a3e9c82eb2d17662f2227ad6a"
 [[package]]
 name = "candid"
 version = "0.10.20"
-source = "git+https://github.com/wiyota/candid?branch=spanned-ast#7e38599de1eb8d2f812d40a4c7560a4d77b76f62"
+source = "git+https://github.com/wiyota/candid?branch=spanned-ast#3535a59cd5a5dfef30481808089f980df484f2a6"
 dependencies = [
  "anyhow",
  "binread",
@@ -259,7 +259,7 @@ dependencies = [
 [[package]]
 name = "candid_derive"
 version = "0.10.20"
-source = "git+https://github.com/wiyota/candid?branch=spanned-ast#7e38599de1eb8d2f812d40a4c7560a4d77b76f62"
+source = "git+https://github.com/wiyota/candid?branch=spanned-ast#3535a59cd5a5dfef30481808089f980df484f2a6"
 dependencies = [
  "lazy_static",
  "proc-macro2",
@@ -270,7 +270,7 @@ dependencies = [
 [[package]]
 name = "candid_parser"
 version = "0.2.3"
-source = "git+https://github.com/wiyota/candid?branch=spanned-ast#7e38599de1eb8d2f812d40a4c7560a4d77b76f62"
+source = "git+https://github.com/wiyota/candid?branch=spanned-ast#3535a59cd5a5dfef30481808089f980df484f2a6"
 dependencies = [
  "anyhow",
  "candid",
@@ -731,7 +731,7 @@ checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 [[package]]
 name = "ic_principal"
 version = "0.1.1"
-source = "git+https://github.com/wiyota/candid?branch=spanned-ast#7e38599de1eb8d2f812d40a4c7560a4d77b76f62"
+source = "git+https://github.com/wiyota/candid?branch=spanned-ast#3535a59cd5a5dfef30481808089f980df484f2a6"
 dependencies = [
  "arbitrary",
  "crc32fast",

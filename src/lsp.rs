@@ -8,7 +8,7 @@ use crate::{
 };
 use candid_parser::{
     candid::{Error as CandidCoreError, error::Label as CandidLabel},
-    syntax::spanned::IDLProg,
+    syntax::IDLProg,
     token::{LexicalError, Token},
 };
 use dashmap::DashMap;
