@@ -4,7 +4,7 @@ use crate::lsp::{
     symbol_table::ImportKind,
 };
 use ropey::Rope;
-use tower_lsp_server::{jsonrpc::Result, lsp_types::*};
+use tower_lsp_server::{jsonrpc::Result, ls_types::*};
 
 pub fn hover(server: &CandidLanguageServer, params: HoverParams) -> Result<Option<Hover>> {
     let response = (|| {

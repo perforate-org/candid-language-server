@@ -1,5 +1,5 @@
 use candid_parser::token::Token;
-use tower_lsp_server::lsp_types::SemanticTokenType;
+use tower_lsp_server::ls_types::SemanticTokenType;
 
 // Additional token types used to enrich the semantic-token legend beyond the built-ins.
 const COMMENT_DELIMITER: SemanticTokenType = SemanticTokenType::new("commentDelimiter");

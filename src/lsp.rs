@@ -20,7 +20,7 @@ use std::{borrow::Cow, error::Error as StdError, fmt::Write};
 use tower_lsp_server::{
     Client, LanguageServer,
     jsonrpc::Result,
-    lsp_types::{notification::Notification, *},
+    ls_types::{notification::Notification, *},
 };
 
 pub mod hover;

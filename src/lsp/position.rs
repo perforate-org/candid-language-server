@@ -1,5 +1,5 @@
 use ropey::Rope;
-use tower_lsp_server::lsp_types::{Position, Range};
+use tower_lsp_server::ls_types::{Position, Range};
 
 use crate::lsp::span::Span;
 
