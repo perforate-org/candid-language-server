@@ -1,7 +1,10 @@
 use candid_language_server::{
     candid_lang::{ParserResult, parse},
     lsp::{
-        hover::hover_contents, navigation::lookup_identifier, semantic_analyze::analyze_program,
+        hover::hover_contents,
+        navigation::lookup_identifier,
+        semantic_analyze::analyze_program,
+        type_docs::{KeywordDoc, keyword_doc},
     },
 };
 use ropey::Rope;
@@ -126,21 +129,11 @@ fn hover_keyword_vec_displays_doc() {
     let HoverContents::Markup(markup) = hover else {
         panic!("expected markup");
     };
-    assert!(
-        markup.value.contains("```candid\nvec"),
-        "missing vec header: {}",
-        markup.value
-    );
-    assert!(
-        markup.value.contains("Ordered sequences"),
-        "missing vec description: {}",
-        markup.value
-    );
+    let expected_doc = keyword_doc(KeywordDoc::Vec).expect("vec doc");
     assert_eq!(
-        markup.value.matches("```candid").count(),
-        1,
-        "vec hover should only render the keyword doc: {}",
-        markup.value
+        markup.value.trim(),
+        expected_doc.trim(),
+        "vec hover should render keyword docs only"
     );
 }
 
@@ -158,17 +151,11 @@ fn hover_keyword_type_displays_doc() {
     let HoverContents::Markup(markup) = hover else {
         panic!("expected markup");
     };
-    assert!(
-        markup.value.contains("```candid\ntype"),
-        "missing type snippet: {}",
-        markup.value
-    );
-    assert!(
-        markup
-            .value
-            .contains("Introduces a named alias for any Candid type"),
-        "type doc missing body: {}",
-        markup.value
+    let expected_doc = keyword_doc(KeywordDoc::Type).expect("type doc");
+    assert_eq!(
+        markup.value.trim(),
+        expected_doc.trim(),
+        "type keyword hover should render keyword docs only"
     );
 }
 
@@ -179,24 +166,18 @@ fn hover_keyword_service_displays_doc() {
     let ast = ast.expect("parsed AST");
     let semantic = analyze_program(&ast, &rope).expect("semantic");
 
-    let offset = text
-        .find("service Api")
-        .expect("service keyword span");
+    let offset = text.find("service Api").expect("service keyword span");
     let info = lookup_identifier(&semantic, offset).expect("lookup service");
 
     let hover = hover_contents(&rope, &semantic, &info).expect("hover result");
     let HoverContents::Markup(markup) = hover else {
         panic!("expected markup");
     };
-    assert!(
-        markup.value.contains("```candid\nservice"),
-        "service snippet missing: {}",
-        markup.value
-    );
-    assert!(
-        markup.value.contains("Declares full service interfaces"),
-        "service docs missing description: {}",
-        markup.value
+    let expected_doc = keyword_doc(KeywordDoc::Service).expect("service doc");
+    assert_eq!(
+        markup.value.trim(),
+        expected_doc.trim(),
+        "service keyword hover should render keyword docs only"
     );
 }
 
@@ -249,15 +230,11 @@ fn hover_keyword_query_displays_doc() {
     let HoverContents::Markup(markup) = hover else {
         panic!("expected markup");
     };
-    assert!(
-        markup.value.contains("```candid\nquery"),
-        "query snippet missing: {}",
-        markup.value
-    );
-    assert!(
-        markup.value.contains("Marks a function as read-only"),
-        "query docs missing description: {}",
-        markup.value
+    let expected_doc = keyword_doc(KeywordDoc::Query).expect("query doc");
+    assert_eq!(
+        markup.value.trim(),
+        expected_doc.trim(),
+        "query keyword hover should render keyword docs only"
     );
 }
 
@@ -275,15 +252,11 @@ fn hover_keyword_composite_query_displays_doc() {
     let HoverContents::Markup(markup) = hover else {
         panic!("expected markup");
     };
-    assert!(
-        markup.value.contains("```candid\ncomposite_query"),
-        "composite_query snippet missing: {}",
-        markup.value
-    );
-    assert!(
-        markup.value.contains("Marks a method as a composite query"),
-        "composite_query docs missing description: {}",
-        markup.value
+    let expected_doc = keyword_doc(KeywordDoc::CompositeQuery).expect("composite_query doc");
+    assert_eq!(
+        markup.value.trim(),
+        expected_doc.trim(),
+        "composite_query keyword hover should render keyword docs only"
     );
 }
 

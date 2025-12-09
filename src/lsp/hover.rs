@@ -364,7 +364,7 @@ mod tests {
         semantic_analyze::{
             FieldMetadata, MethodMetadata, ParamMetadata, PrimitiveHover, Semantic,
         },
-        symbol_table::{SymbolId, SymbolTable},
+        symbol_table::{ImportEntry, ImportKind, SymbolId, SymbolTable},
     };
     use candid_parser::syntax::PrimType;
     use oxc_index::IndexVec;
@@ -448,6 +448,69 @@ mod tests {
         assert!(
             content.value.contains("Unbounded non-negative"),
             "primitive description missing"
+        );
+    }
+
+    #[test]
+    fn hover_definition_fallback_triggers_when_no_sections() {
+        let semantic = base_semantic();
+        let rope = Rope::from_str("type Foo = nat");
+        let info = IdentifierInfo {
+            ident_span: 0..0,
+            definition_span: Some(5..8),
+            symbol_id: None,
+            reference_id: None,
+            import: None,
+            field: None,
+            service_method: None,
+            param: None,
+            primitive: None,
+            keyword: None,
+            actor: None,
+        };
+
+        let hover = hover_contents(&rope, &semantic, &info).expect("hover");
+        let HoverContents::Markup(content) = hover else {
+            panic!("expected markup");
+        };
+        assert!(
+            content.value.contains("Definition: `Foo`"),
+            "fallback definition missing: {}",
+            content.value
+        );
+    }
+
+    #[test]
+    fn hover_includes_import_metadata() {
+        let semantic = base_semantic();
+        let rope = Rope::from_str("Foo");
+        let info = IdentifierInfo {
+            ident_span: 0..3,
+            definition_span: None,
+            symbol_id: None,
+            reference_id: None,
+            import: Some(ImportEntry {
+                kind: ImportKind::Service,
+                path: "foo.did".to_string(),
+                span: 0..3,
+                symbol_id: SymbolId::from_raw(0),
+            }),
+            field: None,
+            service_method: None,
+            param: None,
+            primitive: None,
+            keyword: None,
+            actor: None,
+        };
+
+        let hover = hover_contents(&rope, &semantic, &info).expect("hover");
+        let HoverContents::Markup(content) = hover else {
+            panic!("expected markup");
+        };
+        assert!(
+            content.value.contains("Imported service from `foo.did`"),
+            "import metadata missing: {}",
+            content.value
         );
     }
 }
