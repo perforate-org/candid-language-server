@@ -425,7 +425,10 @@ pub fn analyze_program(ast: &IDLProg, rope: &Rope) -> Result<Semantic> {
             });
         }
     }
-    if let Some(actor) = &ctx.actor && let Some(name_span) = &actor.name_span && name_span.start < name_span.end {
+    if let Some(actor) = &ctx.actor
+        && let Some(name_span) = &actor.name_span
+        && name_span.start < name_span.end
+    {
         ident_range.insert(Interval {
             start: name_span.start,
             stop: name_span.end,

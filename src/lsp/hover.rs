@@ -33,83 +33,294 @@ pub fn hover(server: &CandidLanguageServer, params: HoverParams) -> Result<Optio
     Ok(response)
 }
 
+/// Compose hover markup for the identifier located at `info.ident_span`.
+///
+/// The rendering pipeline has three steps:
+/// 1. `HoverContext` snapshots the current Rope/Semantic state.
+/// 2. `HoverBuilder` classifies the identifier into a `HoverSubject`.
+/// 3. The builder converts that subject plus any reference metadata into
+///    ordered Markdown sections (`HoverSection`) before returning a LSP hover.
 pub fn hover_contents(
     rope: &Rope,
     semantic: &Semantic,
     info: &IdentifierInfo,
 ) -> Option<HoverContents> {
-    let mut sections = Vec::new();
-    let has_inline_doc = info.primitive.is_some() || info.keyword.is_some();
+    let context = HoverContext::new(rope, semantic, info);
+    HoverBuilder::new(context).render()
+}
 
-    if !has_inline_doc {
-        if let Some(param_info) = &info.param
-            && let Some(param_snippet) = snippet_from_span(rope, &param_info.span)
-        {
-            sections.push(format!("```candid\n{param_snippet}\n```"));
-        } else if let Some(method_info) = &info.service_method
-            && let Some(method_snippet) = snippet_from_span(rope, &method_info.span)
-        {
-            if let Some(parent) = &method_info.parent_name {
-                sections.push(format!("```candid\n{parent}\n```"));
-            }
-            push_snippet_with_docs(&mut sections, method_snippet, &method_info.docs);
-        } else if let Some(actor_info) = &info.actor {
-            if let Some(definition) = &actor_info.definition {
-                push_snippet_with_docs(&mut sections, definition.clone(), &actor_info.docs);
-            } else if let Some(actor_snippet) = snippet_from_span(rope, &actor_info.span) {
-                push_snippet_with_docs(&mut sections, actor_snippet, &actor_info.docs);
-            }
-        } else if let Some(field_info) = &info.field
-            && let Some(field_snippet) = snippet_from_span(rope, &field_info.span)
-        {
-            if let Some(parent) = &field_info.parent_name {
-                sections.push(format!("```candid\n{parent}\n```"));
-            }
-            push_snippet_with_docs(&mut sections, field_snippet, &field_info.docs);
-        } else if let Some(type_doc) = type_section(semantic, info) {
-            push_snippet_with_docs(&mut sections, type_doc.definition, &type_doc.docs);
-        } else if let Some(ident_snippet) = snippet_from_span(rope, &info.ident_span) {
-            sections.push(format!("```candid\n{ident_snippet}\n```"));
+struct HoverContext<'a> {
+    rope: &'a Rope,
+    semantic: &'a Semantic,
+    info: &'a IdentifierInfo,
+}
+
+impl<'a> HoverContext<'a> {
+    fn new(rope: &'a Rope, semantic: &'a Semantic, info: &'a IdentifierInfo) -> Self {
+        Self {
+            rope,
+            semantic,
+            info,
         }
     }
 
-    if let Some(prim) = &info.primitive {
-        let doc = match prim {
-            PrimitiveHover::Prim(kind) => primitive_doc(kind),
-            PrimitiveHover::Blob => blob_doc(),
-        };
-        sections.push(doc);
+    fn info(&self) -> &IdentifierInfo {
+        self.info
     }
 
-    if let Some(keyword) = info.keyword.and_then(keyword_doc) {
-        sections.push(keyword);
+    fn snippet_from(&self, span: &Span) -> Option<String> {
+        snippet_from_span(self.rope, span)
     }
 
-    if let Some(import) = &info.import {
-        let kind = match import.kind {
-            ImportKind::Type => "type",
-            ImportKind::Service => "service",
-        };
-        sections.push(format!("Imported {kind} from `{}`", import.path));
+    fn has_inline_doc(&self) -> bool {
+        self.info.primitive.is_some() || self.info.keyword.is_some()
     }
 
-    if let Some(def_span) = &info.definition_span
-        && sections.is_empty()
-        && def_span != &info.ident_span
-        && let Some(def_snippet) = snippet_from_span(rope, def_span)
-    {
-        sections.push(format!("Definition: `{def_snippet}`"));
+    fn type_doc(&self) -> Option<&'a TypeDoc> {
+        let symbol_id = self.info.symbol_id?;
+        self.semantic.type_docs.get(symbol_id)?.as_ref()
+    }
+}
+
+/// Incrementally assembles Markdown sections for a hover response.
+struct HoverBuilder<'a> {
+    context: HoverContext<'a>,
+    sections: Vec<HoverSection>,
+}
+
+impl<'a> HoverBuilder<'a> {
+    fn new(context: HoverContext<'a>) -> Self {
+        Self {
+            context,
+            sections: Vec::new(),
+        }
     }
 
-    if sections.is_empty() {
-        return None;
+    fn render(mut self) -> Option<HoverContents> {
+        self.collect_subject_sections();
+        self.collect_reference_sections();
+        self.collect_definition_fallback();
+
+        if self.sections.is_empty() {
+            return None;
+        }
+
+        let value = self
+            .sections
+            .into_iter()
+            .map(|section| section.render())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        Some(HoverContents::Markup(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value,
+        }))
     }
 
-    let value = sections.join("\n\n");
-    Some(HoverContents::Markup(MarkupContent {
-        kind: MarkupKind::Markdown,
-        value,
-    }))
+    fn collect_subject_sections(&mut self) {
+        if self.context.has_inline_doc() {
+            return;
+        }
+
+        let subject = self.extract_subject();
+        match subject {
+            HoverSubject::Param { snippet } => {
+                self.sections.push(HoverSection::code_block(snippet));
+            }
+            HoverSubject::Method {
+                parent,
+                snippet,
+                docs,
+            } => {
+                if let Some(parent) = parent {
+                    self.sections.push(HoverSection::code_block(parent));
+                }
+                push_snippet_with_docs(&mut self.sections, snippet, docs);
+            }
+            HoverSubject::Actor { snippet, docs } => {
+                push_snippet_with_docs(&mut self.sections, snippet, docs);
+            }
+            HoverSubject::Field {
+                parent,
+                snippet,
+                docs,
+            } => {
+                if let Some(parent) = parent {
+                    self.sections.push(HoverSection::code_block(parent));
+                }
+                push_snippet_with_docs(&mut self.sections, snippet, docs);
+            }
+            HoverSubject::TypeDoc { definition, docs } => {
+                push_snippet_with_docs(&mut self.sections, definition, docs);
+            }
+            HoverSubject::Ident { snippet } => {
+                self.sections.push(HoverSection::code_block(snippet));
+            }
+            HoverSubject::None => {}
+        }
+    }
+
+    fn collect_reference_sections(&mut self) {
+        let info = self.context.info();
+
+        if let Some(prim) = &info.primitive {
+            let doc = match prim {
+                PrimitiveHover::Prim(kind) => primitive_doc(kind),
+                PrimitiveHover::Blob => blob_doc(),
+            };
+            self.sections.push(HoverSection::text(doc));
+        }
+
+        if let Some(keyword) = info.keyword.and_then(keyword_doc) {
+            self.sections.push(HoverSection::text(keyword));
+        }
+
+        if let Some(import) = &info.import {
+            let kind = match import.kind {
+                ImportKind::Type => "type",
+                ImportKind::Service => "service",
+            };
+            self.sections.push(HoverSection::text(format!(
+                "Imported {kind} from `{}`",
+                import.path
+            )));
+        }
+    }
+
+    fn collect_definition_fallback(&mut self) {
+        let info = self.context.info();
+        if let Some(def_span) = &info.definition_span
+            && self.sections.is_empty()
+            && def_span != &info.ident_span
+            && let Some(def_snippet) = self.context.snippet_from(def_span)
+        {
+            self.sections
+                .push(HoverSection::text(format!("Definition: `{def_snippet}`")));
+        }
+    }
+
+    fn extract_subject(&self) -> HoverSubject {
+        let info = self.context.info();
+
+        if let Some(param_info) = &info.param
+            && let Some(param_snippet) = self.context.snippet_from(&param_info.span)
+        {
+            return HoverSubject::Param {
+                snippet: param_snippet,
+            };
+        }
+
+        if let Some(method_info) = &info.service_method
+            && let Some(method_snippet) = self.context.snippet_from(&method_info.span)
+        {
+            return HoverSubject::Method {
+                parent: method_info.parent_name.clone(),
+                snippet: method_snippet,
+                docs: method_info.docs.clone(),
+            };
+        }
+
+        if let Some(actor_info) = &info.actor {
+            if let Some(definition) = &actor_info.definition {
+                return HoverSubject::Actor {
+                    snippet: definition.clone(),
+                    docs: actor_info.docs.clone(),
+                };
+            } else if let Some(actor_snippet) = self.context.snippet_from(&actor_info.span) {
+                return HoverSubject::Actor {
+                    snippet: actor_snippet,
+                    docs: actor_info.docs.clone(),
+                };
+            }
+        }
+
+        if let Some(field_info) = &info.field
+            && let Some(field_snippet) = self.context.snippet_from(&field_info.span)
+        {
+            return HoverSubject::Field {
+                parent: field_info.parent_name.clone(),
+                snippet: field_snippet,
+                docs: field_info.docs.clone(),
+            };
+        }
+
+        if let Some(type_doc) = self.context.type_doc() {
+            return HoverSubject::TypeDoc {
+                definition: type_doc.definition.clone(),
+                docs: type_doc.docs.clone(),
+            };
+        }
+
+        if let Some(ident_snippet) = self.context.snippet_from(&info.ident_span) {
+            return HoverSubject::Ident {
+                snippet: ident_snippet,
+            };
+        }
+
+        HoverSubject::None
+    }
+}
+
+enum HoverSubject {
+    Param {
+        snippet: String,
+    },
+    Method {
+        parent: Option<String>,
+        snippet: String,
+        docs: Option<String>,
+    },
+    Actor {
+        snippet: String,
+        docs: Option<String>,
+    },
+    Field {
+        parent: Option<String>,
+        snippet: String,
+        docs: Option<String>,
+    },
+    TypeDoc {
+        definition: String,
+        docs: Option<String>,
+    },
+    Ident {
+        snippet: String,
+    },
+    None,
+}
+
+#[derive(Clone)]
+enum HoverSection {
+    CodeBlock {
+        language: &'static str,
+        code: String,
+    },
+    Text(String),
+    Rule,
+}
+
+impl HoverSection {
+    fn code_block(code: String) -> Self {
+        HoverSection::CodeBlock {
+            language: "candid",
+            code,
+        }
+    }
+
+    fn text<T: Into<String>>(value: T) -> Self {
+        HoverSection::Text(value.into())
+    }
+
+    fn render(self) -> String {
+        match self {
+            HoverSection::CodeBlock { language, code } => {
+                format!("```{language}\n{code}\n```")
+            }
+            HoverSection::Text(text) => text,
+            HoverSection::Rule => "---".to_string(),
+        }
+    }
 }
 
 pub fn snippet_from_span(rope: &Rope, span: &Span) -> Option<String> {
@@ -134,20 +345,15 @@ pub fn snippet_from_span(rope: &Rope, span: &Span) -> Option<String> {
     Some(snippet)
 }
 
-fn type_section(semantic: &Semantic, info: &IdentifierInfo) -> Option<TypeDoc> {
-    let symbol_id = info.symbol_id?;
-    semantic.type_docs.get(symbol_id)?.clone()
-}
-
-fn push_snippet_with_docs(sections: &mut Vec<String>, snippet: String, docs: &Option<String>) {
-    sections.push(format!("```candid\n{snippet}\n```"));
+fn push_snippet_with_docs(sections: &mut Vec<HoverSection>, snippet: String, docs: Option<String>) {
+    sections.push(HoverSection::code_block(snippet));
     push_docs_section(sections, docs);
 }
 
-fn push_docs_section(sections: &mut Vec<String>, docs: &Option<String>) {
+fn push_docs_section(sections: &mut Vec<HoverSection>, docs: Option<String>) {
     if let Some(doc) = docs {
-        sections.push("---".to_string());
-        sections.push(doc.clone());
+        sections.push(HoverSection::Rule);
+        sections.push(HoverSection::text(doc));
     }
 }
 
