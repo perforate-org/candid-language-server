@@ -1,7 +1,9 @@
 use crate::lsp::{
-    semantic_analyze::{FieldPart, IdentType, ParamRole, PrimitiveHover, Semantic},
+    semantic_analyze::{
+        FieldId, FieldPart, IdentType, MethodId, ParamId, PrimitiveHover, Semantic,
+    },
     span::Span,
-    symbol_table::{ImportEntry, ReferenceId, SymbolId},
+    symbol_table::{ReferenceId, SymbolId},
     type_docs::KeywordDoc,
 };
 
@@ -12,7 +14,6 @@ pub struct IdentifierInfo {
     pub definition_span: Option<Span>,
     pub symbol_id: Option<SymbolId>,
     pub reference_id: Option<ReferenceId>,
-    pub import: Option<ImportEntry>,
     pub field: Option<FieldIdentifier>,
     pub service_method: Option<MethodIdentifier>,
     pub param: Option<ParamIdentifier>,
@@ -23,35 +24,22 @@ pub struct IdentifierInfo {
 
 #[derive(Debug, Clone)]
 pub struct FieldIdentifier {
-    pub span: Span,
-    pub label_span: Option<Span>,
-    pub type_span: Option<Span>,
+    pub id: FieldId,
     pub role: FieldRole,
-    pub docs: Option<String>,
-    pub parent_name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct MethodIdentifier {
-    pub span: Span,
-    pub type_span: Option<Span>,
-    pub docs: Option<String>,
-    pub parent_name: Option<String>,
+    pub id: MethodId,
 }
 
 #[derive(Debug, Clone)]
 pub struct ParamIdentifier {
-    pub span: Span,
-    pub type_span: Span,
-    pub role: ParamRole,
+    pub id: ParamId,
 }
 
 #[derive(Debug, Clone)]
-pub struct ActorIdentifier {
-    pub span: Span,
-    pub docs: Option<String>,
-    pub definition: Option<String>,
-}
+pub struct ActorIdentifier;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldRole {
@@ -92,19 +80,12 @@ pub fn lookup_identifier(semantic: &Semantic, offset: usize) -> Option<Identifie
                 .get(symbol_id)
                 .and_then(|opt| opt.clone())
                 .unwrap_or(fallback_span.clone());
-            let import = semantic
-                .table
-                .imports
-                .iter()
-                .find(|entry| entry.symbol_id == symbol_id)
-                .cloned();
 
             Some(IdentifierInfo {
                 ident_span: span,
                 definition_span: Some(fallback_span),
                 symbol_id: Some(symbol_id),
                 reference_id: None,
-                import,
                 field: None,
                 service_method: None,
                 param: None,
@@ -118,21 +99,12 @@ pub fn lookup_identifier(semantic: &Semantic, offset: usize) -> Option<Identifie
             let symbol_id = reference.symbol_id;
             let definition_span =
                 symbol_id.and_then(|sid| semantic.table.symbol_id_to_span.get(sid).cloned());
-            let import = symbol_id.and_then(|sid| {
-                semantic
-                    .table
-                    .imports
-                    .iter()
-                    .find(|entry| entry.symbol_id == sid)
-                    .cloned()
-            });
 
             Some(IdentifierInfo {
                 ident_span: reference.span.clone(),
                 definition_span,
                 symbol_id,
                 reference_id: Some(reference_id),
-                import,
                 field: None,
                 service_method: None,
                 param: None,
@@ -152,17 +124,12 @@ pub fn lookup_identifier(semantic: &Semantic, offset: usize) -> Option<Identifie
                 definition_span: Some(metadata.span.clone()),
                 symbol_id: None,
                 reference_id: None,
-                import: None,
                 field: Some(FieldIdentifier {
-                    span: metadata.span.clone(),
-                    label_span: metadata.label_span.clone(),
-                    type_span: metadata.type_span.clone(),
+                    id: field_id,
                     role: match part {
                         FieldPart::Label => FieldRole::Label,
                         FieldPart::Type => FieldRole::Type,
                     },
-                    docs: metadata.docs.clone(),
-                    parent_name: metadata.parent_name.clone(),
                 }),
                 service_method: None,
                 param: None,
@@ -179,14 +146,8 @@ pub fn lookup_identifier(semantic: &Semantic, offset: usize) -> Option<Identifie
                 definition_span: Some(metadata.span.clone()),
                 symbol_id: None,
                 reference_id: None,
-                import: None,
                 field: None,
-                service_method: Some(MethodIdentifier {
-                    span: metadata.span.clone(),
-                    type_span: metadata.type_span.clone(),
-                    docs: metadata.docs.clone(),
-                    parent_name: metadata.parent_name.clone(),
-                }),
+                service_method: Some(MethodIdentifier { id: method_id }),
                 param: None,
                 primitive: None,
                 keyword: None,
@@ -201,14 +162,9 @@ pub fn lookup_identifier(semantic: &Semantic, offset: usize) -> Option<Identifie
                 definition_span: Some(metadata.span.clone()),
                 symbol_id: None,
                 reference_id: None,
-                import: None,
                 field: None,
                 service_method: None,
-                param: Some(ParamIdentifier {
-                    span: metadata.span.clone(),
-                    type_span: metadata.type_span.clone(),
-                    role: metadata.role,
-                }),
+                param: Some(ParamIdentifier { id: param_id }),
                 primitive: None,
                 keyword: None,
                 actor: None,
@@ -219,7 +175,6 @@ pub fn lookup_identifier(semantic: &Semantic, offset: usize) -> Option<Identifie
             definition_span: None,
             symbol_id: None,
             reference_id: None,
-            import: None,
             field: None,
             service_method: None,
             param: None,
@@ -232,7 +187,6 @@ pub fn lookup_identifier(semantic: &Semantic, offset: usize) -> Option<Identifie
             definition_span: None,
             symbol_id: None,
             reference_id: None,
-            import: None,
             field: None,
             service_method: None,
             param: None,
@@ -248,17 +202,12 @@ pub fn lookup_identifier(semantic: &Semantic, offset: usize) -> Option<Identifie
                 definition_span: Some(actor.span.clone()),
                 symbol_id: None,
                 reference_id: None,
-                import: None,
                 field: None,
                 service_method: None,
                 param: None,
                 primitive: None,
                 keyword: None,
-                actor: Some(ActorIdentifier {
-                    span: actor.span.clone(),
-                    docs: actor.docs.clone(),
-                    definition: actor.definition.clone(),
-                }),
+                actor: Some(ActorIdentifier),
             })
         }
     }

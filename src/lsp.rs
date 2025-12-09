@@ -16,7 +16,7 @@ use lalrpop_util::ParseError;
 use log::debug;
 use rapidhash::fast::RandomState;
 use ropey::Rope;
-use std::{borrow::Cow, error::Error as StdError, fmt::Write};
+use std::{borrow::Cow, error::Error as StdError, fmt::Write, sync::Mutex};
 use tower_lsp_server::{
     Client, LanguageServer,
     jsonrpc::Result,
@@ -43,6 +43,8 @@ pub struct CandidLanguageServer {
     pub semantic_map: DashMap<String, Semantic, RandomState>,
     pub semantic_token_map: DashMap<String, Vec<ImCompleteSemanticToken>, RandomState>,
     pub document_map: DashMap<String, Rope, RandomState>,
+    pub document_version_map: DashMap<String, i32, RandomState>,
+    hover_offset_cache: Mutex<HoverOffsetCache>,
 }
 
 impl LanguageServer for CandidLanguageServer {
@@ -140,10 +142,12 @@ impl LanguageServer for CandidLanguageServer {
                     rope = Rope::from_str(&text);
                 }
                 Some(range) => {
-                    let mut start_offset =
-                        position_to_offset(range.start, &rope).unwrap_or_else(|| rope.len_chars());
-                    let mut end_offset =
-                        position_to_offset(range.end, &rope).unwrap_or(start_offset);
+                    let mut start_offset = self
+                        .cached_position_to_offset(&uri_key, range.start, &rope)
+                        .unwrap_or_else(|| rope.len_chars());
+                    let mut end_offset = self
+                        .cached_position_to_offset(&uri_key, range.end, &rope)
+                        .unwrap_or(start_offset);
 
                     let doc_len = rope.len_chars();
                     start_offset = start_offset.min(doc_len);
@@ -199,7 +203,7 @@ impl LanguageServer for CandidLanguageServer {
             let semantic = self.semantic_map.get(&uri_key)?;
             let rope = self.document_map.get(&uri_key)?;
             let position = params.text_document_position_params.position;
-            let offset = position_to_offset(position, &rope)?;
+            let offset = self.cached_position_to_offset(&uri_key, position, &rope)?;
 
             let info = lookup_identifier(&semantic, offset)?;
             let definition_span = info.definition_span?;
@@ -241,11 +245,11 @@ impl CandidLanguageServer {
             semantic_map: DashMap::with_hasher(hasher),
             semantic_token_map: DashMap::with_hasher(hasher),
             document_map: DashMap::with_hasher(hasher),
+            document_version_map: DashMap::with_hasher(hasher),
+            hover_offset_cache: Mutex::new(HoverOffsetCache::new(64)),
         }
     }
-}
 
-impl CandidLanguageServer {
     async fn on_change(&self, params: TextDocumentItem<'_>) {
         let TextDocumentItem {
             uri,
@@ -256,6 +260,14 @@ impl CandidLanguageServer {
         let uri_key = uri.to_string();
 
         self.document_map.insert(uri_key.clone(), rope.clone());
+        if let Some(version) = version {
+            self.document_version_map.insert(uri_key.clone(), version);
+        } else {
+            self.document_version_map.remove(&uri_key);
+        }
+        if let Ok(mut cache) = self.hover_offset_cache.lock() {
+            cache.invalidate_uri(&uri_key);
+        }
 
         let ParserResult {
             ast,
@@ -348,6 +360,99 @@ impl CandidLanguageServer {
             .publish_diagnostics(uri.clone(), diagnostics, version)
             .await;
         self.semantic_token_map.insert(uri_key, semantic_tokens);
+    }
+
+    fn cached_position_to_offset(
+        &self,
+        uri: &str,
+        position: Position,
+        rope: &Rope,
+    ) -> Option<usize> {
+        let version = self
+            .document_version_map
+            .get(uri)
+            .map(|entry| *entry.value());
+
+        {
+            if let Ok(mut cache) = self.hover_offset_cache.lock()
+                && let Some(offset) = cache.lookup(uri, version, &position)
+            {
+                return Some(offset);
+            }
+        }
+
+        let offset = position_to_offset(position, rope)?;
+
+        if let Ok(mut cache) = self.hover_offset_cache.lock() {
+            cache.insert(uri.to_string(), version, position, offset);
+        }
+
+        Some(offset)
+    }
+}
+
+#[derive(Debug)]
+struct HoverOffsetCache {
+    entries: Vec<HoverCacheEntry>,
+    capacity: usize,
+}
+
+impl HoverOffsetCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            entries: Vec::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    fn lookup(&mut self, uri: &str, version: Option<i32>, position: &Position) -> Option<usize> {
+        if let Some(idx) = self
+            .entries
+            .iter()
+            .position(|entry| entry.matches(uri, version, position))
+        {
+            let entry = self.entries.remove(idx);
+            let offset = entry.offset;
+            self.entries.push(entry);
+            Some(offset)
+        } else {
+            None
+        }
+    }
+
+    fn insert(&mut self, uri: String, version: Option<i32>, position: Position, offset: usize) {
+        if self.entries.len() >= self.capacity {
+            self.entries.remove(0);
+        }
+        self.entries.push(HoverCacheEntry {
+            uri,
+            version,
+            line: position.line,
+            column: position.character,
+            offset,
+        });
+    }
+
+    fn invalidate_uri(&mut self, uri: &str) {
+        self.entries.retain(|entry| entry.uri != uri);
+    }
+}
+
+#[derive(Debug)]
+struct HoverCacheEntry {
+    uri: String,
+    version: Option<i32>,
+    line: u32,
+    column: u32,
+    offset: usize,
+}
+
+impl HoverCacheEntry {
+    fn matches(&self, uri: &str, version: Option<i32>, position: &Position) -> bool {
+        self.uri == uri
+            && self.version == version
+            && self.line == position.line
+            && self.column == position.character
     }
 }
 

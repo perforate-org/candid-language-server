@@ -1,14 +1,15 @@
 use crate::lsp::{
     CandidLanguageServer, lookup_identifier,
     navigation::IdentifierInfo,
-    position::position_to_offset,
     semantic_analyze::{PrimitiveHover, Semantic},
     span::Span,
     span_to_range,
     symbol_table::ImportKind,
     type_docs::{TypeDoc, blob_doc, keyword_doc, primitive_doc},
 };
+use rapidhash::fast::RandomState;
 use ropey::Rope;
+use std::{collections::HashMap, sync::Arc};
 use tower_lsp_server::{jsonrpc::Result, ls_types::*};
 
 pub fn hover(server: &CandidLanguageServer, params: HoverParams) -> Result<Option<Hover>> {
@@ -18,7 +19,7 @@ pub fn hover(server: &CandidLanguageServer, params: HoverParams) -> Result<Optio
         let semantic = server.semantic_map.get(&uri_key)?;
         let rope = server.document_map.get(&uri_key)?;
         let position = params.text_document_position_params.position;
-        let offset = position_to_offset(position, &rope)?;
+        let offset = server.cached_position_to_offset(&uri_key, position, &rope)?;
 
         let info = lookup_identifier(&semantic, offset)?;
         let hover_range = span_to_range(&info.ident_span, &rope)?;
@@ -68,8 +69,12 @@ impl<'a> HoverContext<'a> {
         self.info
     }
 
-    fn snippet_from(&self, span: &Span) -> Option<String> {
-        snippet_from_span(self.rope, span)
+    fn semantic(&self) -> &Semantic {
+        self.semantic
+    }
+
+    fn rope(&self) -> &Rope {
+        self.rope
     }
 
     fn has_inline_doc(&self) -> bool {
@@ -86,6 +91,7 @@ impl<'a> HoverContext<'a> {
 struct HoverBuilder<'a> {
     context: HoverContext<'a>,
     writer: HoverWriter,
+    snippet_cache: SnippetCache,
 }
 
 impl<'a> HoverBuilder<'a> {
@@ -93,6 +99,7 @@ impl<'a> HoverBuilder<'a> {
         Self {
             context,
             writer: HoverWriter::new(),
+            snippet_cache: SnippetCache::new(),
         }
     }
 
@@ -117,7 +124,7 @@ impl<'a> HoverBuilder<'a> {
         let subject = self.extract_subject();
         match subject {
             HoverSubject::Param { snippet } => {
-                self.writer.push_code_block(snippet);
+                self.writer.push_code_block(&snippet);
             }
             HoverSubject::Method {
                 parent,
@@ -125,12 +132,12 @@ impl<'a> HoverBuilder<'a> {
                 docs,
             } => {
                 if let Some(parent) = parent {
-                    self.writer.push_code_block(parent);
+                    self.writer.push_code_block(&parent);
                 }
-                push_snippet_with_docs(&mut self.writer, snippet, docs);
+                push_snippet_with_docs(&mut self.writer, &snippet, docs);
             }
             HoverSubject::Actor { snippet, docs } => {
-                push_snippet_with_docs(&mut self.writer, snippet, docs);
+                push_snippet_with_docs(&mut self.writer, &snippet, docs);
             }
             HoverSubject::Field {
                 parent,
@@ -138,15 +145,15 @@ impl<'a> HoverBuilder<'a> {
                 docs,
             } => {
                 if let Some(parent) = parent {
-                    self.writer.push_code_block(parent);
+                    self.writer.push_code_block(&parent);
                 }
-                push_snippet_with_docs(&mut self.writer, snippet, docs);
+                push_snippet_with_docs(&mut self.writer, &snippet, docs);
             }
             HoverSubject::TypeDoc { definition, docs } => {
-                push_snippet_with_docs(&mut self.writer, definition, docs);
+                push_snippet_with_docs(&mut self.writer, &definition, docs);
             }
             HoverSubject::Ident { snippet } => {
-                self.writer.push_code_block(snippet);
+                self.writer.push_code_block(&snippet);
             }
             HoverSubject::None => {}
         }
@@ -167,7 +174,15 @@ impl<'a> HoverBuilder<'a> {
             self.writer.push_text(keyword);
         }
 
-        if let Some(import) = &info.import {
+        if let Some(symbol_id) = info.symbol_id
+            && let Some(import) = self
+                .context
+                .semantic()
+                .table
+                .imports
+                .iter()
+                .find(|entry| entry.symbol_id == symbol_id)
+        {
             let kind = match import.kind {
                 ImportKind::Type => "type",
                 ImportKind::Service => "service",
@@ -178,59 +193,104 @@ impl<'a> HoverBuilder<'a> {
     }
 
     fn collect_definition_fallback(&mut self) {
-        let info = self.context.info();
+        let info = self.context.info().clone();
         if let Some(def_span) = &info.definition_span
             && self.writer.is_empty()
             && def_span != &info.ident_span
-            && let Some(def_snippet) = self.context.snippet_from(def_span)
+            && let Some(def_snippet) = self.snippet(def_span)
         {
             self.writer
-                .push_text(format!("Definition: `{def_snippet}`"));
+                .push_text(format!("Definition: `{}`", def_snippet.as_ref()));
         }
     }
 
-    fn extract_subject(&self) -> HoverSubject {
-        let info = self.context.info();
+    fn snippet(&mut self, span: &Span) -> Option<Arc<str>> {
+        self.snippet_cache.get(self.context.rope(), span)
+    }
 
-        if let Some(param_info) = &info.param
-            && let Some(param_snippet) = self.context.snippet_from(&param_info.span)
+    fn extract_subject(&mut self) -> HoverSubject {
+        let info = self.context.info().clone();
+
+        if let Some(param_ref) = info.param
+            && let Some(span) = self
+                .context
+                .semantic()
+                .params
+                .get(param_ref.id)
+                .map(|metadata| metadata.span.clone())
+            && let Some(param_snippet) = self.snippet(&span)
         {
             return HoverSubject::Param {
                 snippet: param_snippet,
             };
         }
 
-        if let Some(method_info) = &info.service_method
-            && let Some(method_snippet) = self.context.snippet_from(&method_info.span)
+        if let Some(method_ref) = info.service_method
+            && let Some((span, parent, docs)) = self
+                .context
+                .semantic()
+                .service_methods
+                .get(method_ref.id)
+                .map(|metadata| {
+                    (
+                        metadata.span.clone(),
+                        metadata.parent_name.clone(),
+                        metadata.docs.clone(),
+                    )
+                })
+            && let Some(method_snippet) = self.snippet(&span)
         {
             return HoverSubject::Method {
-                parent: method_info.parent_name.clone(),
+                parent,
                 snippet: method_snippet,
-                docs: method_info.docs.clone(),
+                docs,
             };
         }
 
-        if let Some(actor_info) = &info.actor {
-            if let Some(definition) = &actor_info.definition {
+        if info.actor.is_some()
+            && let Some((definition, span, docs)) =
+                self.context.semantic().actor.as_ref().map(|actor| {
+                    (
+                        actor.definition.clone(),
+                        actor.span.clone(),
+                        actor.docs.clone(),
+                    )
+                })
+        {
+            if let Some(definition) = definition {
                 return HoverSubject::Actor {
-                    snippet: definition.clone(),
-                    docs: actor_info.docs.clone(),
+                    snippet: definition,
+                    docs,
                 };
-            } else if let Some(actor_snippet) = self.context.snippet_from(&actor_info.span) {
+            }
+
+            if let Some(actor_snippet) = self.snippet(&span) {
                 return HoverSubject::Actor {
                     snippet: actor_snippet,
-                    docs: actor_info.docs.clone(),
+                    docs,
                 };
             }
         }
 
-        if let Some(field_info) = &info.field
-            && let Some(field_snippet) = self.context.snippet_from(&field_info.span)
+        if let Some(field_ref) = info.field
+            && let Some((span, parent, docs)) = self
+                .context
+                .semantic()
+                .fields
+                .get(field_ref.id)
+                .map(|metadata| {
+                    (
+                        metadata.span.clone(),
+                        metadata.parent_name.clone(),
+                        metadata.docs.clone(),
+                    )
+                })
+            && let Some(field_snippet) = self.snippet(&span)
         {
             return HoverSubject::Field {
-                parent: field_info.parent_name.clone(),
+                parent,
                 snippet: field_snippet,
-                docs: field_info.docs.clone(),
+                docs,
             };
         }
 
@@ -241,7 +301,7 @@ impl<'a> HoverBuilder<'a> {
             };
         }
 
-        if let Some(ident_snippet) = self.context.snippet_from(&info.ident_span) {
+        if let Some(ident_snippet) = self.snippet(&info.ident_span) {
             return HoverSubject::Ident {
                 snippet: ident_snippet,
             };
@@ -253,30 +313,56 @@ impl<'a> HoverBuilder<'a> {
 
 enum HoverSubject {
     Param {
-        snippet: String,
+        snippet: Arc<str>,
     },
     Method {
-        parent: Option<String>,
-        snippet: String,
-        docs: Option<String>,
+        parent: Option<Arc<str>>,
+        snippet: Arc<str>,
+        docs: Option<Arc<str>>,
     },
     Actor {
-        snippet: String,
-        docs: Option<String>,
+        snippet: Arc<str>,
+        docs: Option<Arc<str>>,
     },
     Field {
-        parent: Option<String>,
-        snippet: String,
-        docs: Option<String>,
+        parent: Option<Arc<str>>,
+        snippet: Arc<str>,
+        docs: Option<Arc<str>>,
     },
     TypeDoc {
-        definition: String,
-        docs: Option<String>,
+        definition: Arc<str>,
+        docs: Option<Arc<str>>,
     },
     Ident {
-        snippet: String,
+        snippet: Arc<str>,
     },
     None,
+}
+
+struct SnippetCache {
+    map: HashMap<(usize, usize), Option<Arc<str>>, RandomState>,
+}
+
+impl SnippetCache {
+    fn new() -> Self {
+        Self {
+            map: HashMap::with_hasher(RandomState::new()),
+        }
+    }
+
+    fn get(&mut self, rope: &Rope, span: &Span) -> Option<Arc<str>> {
+        let key = (span.start, span.end);
+        match self.map.entry(key) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.get().clone(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let computed = snippet_from_span(rope, span)
+                    .map(|snippet| Arc::<str>::from(snippet.into_boxed_str()));
+                let value = computed.clone();
+                entry.insert(computed);
+                value
+            }
+        }
+    }
 }
 
 struct HoverWriter {
@@ -302,10 +388,10 @@ impl HoverWriter {
         self.buffer.push_str(text.as_ref());
     }
 
-    fn push_code_block(&mut self, code: String) {
+    fn push_code_block(&mut self, code: &str) {
         self.start_section();
         self.buffer.push_str("```candid\n");
-        self.buffer.push_str(&code);
+        self.buffer.push_str(code);
         self.buffer.push_str("\n```");
     }
 
@@ -352,15 +438,15 @@ pub fn snippet_from_span(rope: &Rope, span: &Span) -> Option<String> {
     Some(snippet)
 }
 
-fn push_snippet_with_docs(writer: &mut HoverWriter, snippet: String, docs: Option<String>) {
+fn push_snippet_with_docs(writer: &mut HoverWriter, snippet: &str, docs: Option<Arc<str>>) {
     writer.push_code_block(snippet);
     push_docs_section(writer, docs);
 }
 
-fn push_docs_section(writer: &mut HoverWriter, docs: Option<String>) {
+fn push_docs_section(writer: &mut HoverWriter, docs: Option<Arc<str>>) {
     if let Some(doc) = docs {
         writer.push_rule();
-        writer.push_text(doc);
+        writer.push_text(doc.as_ref());
     }
 }
 
@@ -377,6 +463,7 @@ mod tests {
     use oxc_index::IndexVec;
     use ropey::Rope;
     use rust_lapper::Lapper;
+    use std::sync::Arc;
 
     fn base_semantic() -> Semantic {
         Semantic {
@@ -398,7 +485,7 @@ mod tests {
         let mut semantic = base_semantic();
         semantic.symbol_ident_spans.push(None);
         semantic.type_docs.push(Some(TypeDoc {
-            definition: "type Foo = nat".to_string(),
+            definition: Arc::<str>::from("type Foo = nat"),
             docs: None,
         }));
         let rope = Rope::from_str("type Foo = nat");
@@ -407,7 +494,6 @@ mod tests {
             definition_span: Some(5..8),
             symbol_id: Some(SymbolId::from_raw(0)),
             reference_id: None,
-            import: None,
             field: None,
             service_method: None,
             param: None,
@@ -435,7 +521,6 @@ mod tests {
             definition_span: Some(9..12),
             symbol_id: None,
             reference_id: None,
-            import: None,
             field: None,
             service_method: None,
             param: None,
@@ -467,7 +552,6 @@ mod tests {
             definition_span: Some(5..8),
             symbol_id: None,
             reference_id: None,
-            import: None,
             field: None,
             service_method: None,
             param: None,
@@ -489,19 +573,19 @@ mod tests {
 
     #[test]
     fn hover_includes_import_metadata() {
-        let semantic = base_semantic();
+        let mut semantic = base_semantic();
+        semantic.table.imports.push(ImportEntry {
+            kind: ImportKind::Service,
+            path: "foo.did".to_string(),
+            span: 0..3,
+            symbol_id: SymbolId::from_raw(0),
+        });
         let rope = Rope::from_str("Foo");
         let info = IdentifierInfo {
             ident_span: 0..3,
             definition_span: None,
-            symbol_id: None,
+            symbol_id: Some(SymbolId::from_raw(0)),
             reference_id: None,
-            import: Some(ImportEntry {
-                kind: ImportKind::Service,
-                path: "foo.did".to_string(),
-                span: 0..3,
-                symbol_id: SymbolId::from_raw(0),
-            }),
             field: None,
             service_method: None,
             param: None,

@@ -1,9 +1,10 @@
 use candid_parser::syntax::PrimType;
+use std::sync::{Arc, OnceLock};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TypeDoc {
-    pub definition: String,
-    pub docs: Option<String>,
+    pub definition: Arc<str>,
+    pub docs: Option<Arc<str>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -121,19 +122,115 @@ fn keyword_body(kind: KeywordDoc) -> &'static str {
     }
 }
 
-pub fn primitive_doc(kind: &PrimType) -> String {
-    let header = primitive_name(kind);
-    let body = primitive_body(kind).trim();
-    format!("```candid\n{header}\n```\n\n{body}")
+const PRIMITIVE_KINDS: [PrimType; 17] = [
+    PrimType::Nat,
+    PrimType::Nat8,
+    PrimType::Nat16,
+    PrimType::Nat32,
+    PrimType::Nat64,
+    PrimType::Int,
+    PrimType::Int8,
+    PrimType::Int16,
+    PrimType::Int32,
+    PrimType::Int64,
+    PrimType::Float32,
+    PrimType::Float64,
+    PrimType::Bool,
+    PrimType::Text,
+    PrimType::Null,
+    PrimType::Reserved,
+    PrimType::Empty,
+];
+
+const KEYWORD_KINDS: [KeywordDoc; 11] = [
+    KeywordDoc::Func,
+    KeywordDoc::Opt,
+    KeywordDoc::Principal,
+    KeywordDoc::Record,
+    KeywordDoc::Service,
+    KeywordDoc::Type,
+    KeywordDoc::Variant,
+    KeywordDoc::Vec,
+    KeywordDoc::Oneway,
+    KeywordDoc::Query,
+    KeywordDoc::CompositeQuery,
+];
+
+static PRIMITIVE_DOCS: OnceLock<[String; 17]> = OnceLock::new();
+static KEYWORD_DOCS: OnceLock<[String; 11]> = OnceLock::new();
+static BLOB_DOC: OnceLock<String> = OnceLock::new();
+
+pub fn primitive_doc(kind: &PrimType) -> &'static str {
+    let docs = PRIMITIVE_DOCS.get_or_init(build_primitive_docs);
+    docs[primitive_index(kind)].as_str()
 }
 
-pub fn blob_doc() -> String {
-    let body = prim_doc!("blob").trim();
-    format!("```candid\nblob\n```\n\n{body}")
+pub fn blob_doc() -> &'static str {
+    BLOB_DOC
+        .get_or_init(|| {
+            let body = prim_doc!("blob").trim();
+            format!("```candid\nblob\n```\n\n{body}")
+        })
+        .as_str()
 }
 
-pub fn keyword_doc(kind: KeywordDoc) -> Option<String> {
-    let header = kind.keyword();
-    let body = keyword_body(kind).trim();
-    Some(format!("```candid\n{header}\n```\n\n{body}"))
+pub fn keyword_doc(kind: KeywordDoc) -> Option<&'static str> {
+    let docs = KEYWORD_DOCS.get_or_init(build_keyword_docs);
+    Some(docs[keyword_index(kind)].as_str())
+}
+
+fn build_primitive_docs() -> [String; 17] {
+    std::array::from_fn(|idx| {
+        let kind = &PRIMITIVE_KINDS[idx];
+        let header = primitive_name(kind);
+        let body = primitive_body(kind).trim();
+        format!("```candid\n{header}\n```\n\n{body}")
+    })
+}
+
+fn primitive_index(kind: &PrimType) -> usize {
+    match kind {
+        PrimType::Nat => 0,
+        PrimType::Nat8 => 1,
+        PrimType::Nat16 => 2,
+        PrimType::Nat32 => 3,
+        PrimType::Nat64 => 4,
+        PrimType::Int => 5,
+        PrimType::Int8 => 6,
+        PrimType::Int16 => 7,
+        PrimType::Int32 => 8,
+        PrimType::Int64 => 9,
+        PrimType::Float32 => 10,
+        PrimType::Float64 => 11,
+        PrimType::Bool => 12,
+        PrimType::Text => 13,
+        PrimType::Null => 14,
+        PrimType::Reserved => 15,
+        PrimType::Empty => 16,
+    }
+}
+
+fn build_keyword_docs() -> [String; 11] {
+    std::array::from_fn(|idx| {
+        let kind = KEYWORD_KINDS[idx];
+        let header = kind.keyword();
+        let body = keyword_body(kind).trim();
+        format!("```candid\n{header}\n```\n\n{body}")
+    })
+}
+
+fn keyword_index(kind: KeywordDoc) -> usize {
+    match kind {
+        KeywordDoc::Func => 0,
+        KeywordDoc::Opt => 1,
+        KeywordDoc::Principal => 2,
+        KeywordDoc::Record => 3,
+        KeywordDoc::Service => 4,
+        KeywordDoc::Type => 5,
+        KeywordDoc::Variant => 6,
+        KeywordDoc::Vec => 7,
+        KeywordDoc::Oneway => 8,
+        KeywordDoc::Query => 9,
+        KeywordDoc::CompositeQuery => 10,
+    }
 }

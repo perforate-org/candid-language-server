@@ -15,6 +15,7 @@ use candid_parser::{
 use oxc_index::IndexVec;
 use ropey::Rope;
 use rust_lapper::{Interval, Lapper};
+use std::sync::Arc;
 use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, SemanticError>;
@@ -64,8 +65,8 @@ pub struct FieldMetadata {
     pub span: Span,
     pub label_span: Option<Span>,
     pub type_span: Option<Span>,
-    pub docs: Option<String>,
-    pub parent_name: Option<String>,
+    pub docs: Option<Arc<str>>,
+    pub parent_name: Option<Arc<str>>,
 }
 
 #[derive(Debug, Clone)]
@@ -73,8 +74,8 @@ pub struct MethodMetadata {
     pub span: Span,
     pub name_span: Option<Span>,
     pub type_span: Option<Span>,
-    pub docs: Option<String>,
-    pub parent_name: Option<String>,
+    pub docs: Option<Arc<str>>,
+    pub parent_name: Option<Arc<str>>,
 }
 
 #[derive(Debug, Clone)]
@@ -89,8 +90,8 @@ pub struct ParamMetadata {
 pub struct ActorMetadata {
     pub span: Span,
     pub name_span: Option<Span>,
-    pub docs: Option<String>,
-    pub definition: Option<String>,
+    pub docs: Option<Arc<str>>,
+    pub definition: Option<Arc<str>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -149,7 +150,7 @@ pub struct Ctx<'a> {
     primitive_spans: Vec<(Span, PrimitiveHover)>,
     keyword_spans: Vec<(Span, KeywordDoc)>,
     actor: Option<ActorMetadata>,
-    type_name_stack: Vec<Option<String>>,
+    type_name_stack: Vec<Option<Arc<str>>>,
 }
 
 impl<'a> Ctx<'a> {
@@ -161,14 +162,15 @@ impl<'a> Ctx<'a> {
     }
 
     fn push_type_name(&mut self, name: Option<String>) {
-        self.type_name_stack.push(name);
+        self.type_name_stack
+            .push(name.map(|n| Arc::<str>::from(n.into_boxed_str())));
     }
 
     fn pop_type_name(&mut self) {
         self.type_name_stack.pop();
     }
 
-    fn current_type_name(&self) -> Option<String> {
+    fn current_type_name(&self) -> Option<Arc<str>> {
         self.type_name_stack
             .iter()
             .rev()
@@ -206,7 +208,7 @@ impl<'a> Ctx<'a> {
         self.fields.push(metadata);
     }
 
-    fn register_service_method(&mut self, binding: &Binding, parent_name: Option<String>) {
+    fn register_service_method(&mut self, binding: &Binding, parent_name: Option<Arc<str>>) {
         let name_span = compute_binding_ident_span(binding, self.rope);
         let type_span = if binding.typ.span.start < binding.typ.span.end {
             Some(binding.typ.span.clone())
@@ -323,7 +325,7 @@ pub fn analyze_program(ast: &IDLProg, rope: &Rope) -> Result<Semantic> {
                     let rendered = render_binding(binding);
                     let doc_block = format_docs(&binding.docs);
                     *slot = Some(TypeDoc {
-                        definition: rendered,
+                        definition: Arc::<str>::from(rendered.into_boxed_str()),
                         docs: doc_block,
                     });
                 }
@@ -565,7 +567,8 @@ fn analyze_actor(actor: &IDLActorType, ctx: &mut Ctx) -> Result<()> {
     let name_text = name_span
         .as_ref()
         .map(|span| ctx.rope.slice(span.clone()).to_string());
-    let definition = render_actor_declaration(name_text.as_deref(), &actor.typ);
+    let definition = render_actor_declaration(name_text.as_deref(), &actor.typ)
+        .map(|text| Arc::<str>::from(text.into_boxed_str()));
     ctx.actor = Some(ActorMetadata {
         span: actor.span.clone(),
         name_span,
@@ -716,7 +719,7 @@ fn primitive_keyword(kind: &PrimType) -> &'static str {
     }
 }
 
-fn format_docs(docs: &[String]) -> Option<String> {
+fn format_docs(docs: &[String]) -> Option<Arc<str>> {
     if docs.is_empty() {
         return None;
     }
@@ -731,7 +734,9 @@ fn format_docs(docs: &[String]) -> Option<String> {
     if lines.is_empty() {
         None
     } else {
-        Some(annotate_code_fences(&lines.join("\n")))
+        Some(Arc::<str>::from(
+            annotate_code_fences(&lines.join("\n")).into_boxed_str(),
+        ))
     }
 }
 
