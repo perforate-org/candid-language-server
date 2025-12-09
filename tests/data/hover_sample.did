@@ -1,0 +1,19 @@
+type Foo = record {
+  value : nat32;
+};
+
+type Bar = variant { FooLike : Foo; Empty };
+
+type FooList = vec Foo;
+type MaybeBar = opt Bar;
+type Callback = func (Foo) -> (Foo);
+type Owner = principal;
+type ApiRef = service { ping : () -> (); };
+
+/// Demo API for hover tests.
+service Api : {
+  /// Returns the stored Foo value.
+  get_value : () -> (Foo) query;
+  set_value : (value : Foo) -> ();
+  composite_status : () -> () composite_query;
+};

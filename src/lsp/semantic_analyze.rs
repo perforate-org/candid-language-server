@@ -1,21 +1,103 @@
 use crate::lsp::{
     span::Span,
     symbol_table::{ImportKind, ReferenceId, SymbolId, SymbolTable},
+    type_display::{render_actor_declaration, render_binding},
+    type_docs::{KeywordDoc, TypeDoc},
 };
-use candid_parser::syntax::{
-    Binding, Dec, IDLActorType, IDLProg, IDLType, IDLTypeWithSpan, TypeField,
+use candid_parser::candid::types::internal::FuncMode;
+use candid_parser::{
+    candid::types::Label,
+    syntax::{
+        Binding, Dec, FuncType, IDLActorType, IDLProg, IDLType, IDLTypeWithSpan, PrimType,
+        TypeField,
+    },
 };
+use oxc_index::IndexVec;
+use ropey::Rope;
 use rust_lapper::{Interval, Lapper};
 use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, SemanticError>;
 
+oxc_index::define_index_type! {
+    pub struct FieldId = u32;
+    IMPL_RAW_CONVERSIONS = true;
+}
+
+oxc_index::define_index_type! {
+    pub struct MethodId = u32;
+    IMPL_RAW_CONVERSIONS = true;
+}
+
+oxc_index::define_index_type! {
+    pub struct ParamId = u32;
+    IMPL_RAW_CONVERSIONS = true;
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FieldPart {
+    Label,
+    Type,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParamRole {
+    Argument,
+    Result,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IdentType {
     Binding(SymbolId),
     Reference(ReferenceId),
+    Field(FieldId, FieldPart),
+    ServiceMethod(MethodId),
+    FuncParam(ParamId),
+    Primitive(PrimitiveHover),
+    Keyword(KeywordDoc),
+    Actor,
 }
 type IdentRangeLapper = Lapper<usize, IdentType>;
+
+#[derive(Debug, Clone)]
+pub struct FieldMetadata {
+    pub span: Span,
+    pub label_span: Option<Span>,
+    pub type_span: Option<Span>,
+    pub docs: Option<String>,
+    pub parent_name: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MethodMetadata {
+    pub span: Span,
+    pub name_span: Option<Span>,
+    pub type_span: Option<Span>,
+    pub docs: Option<String>,
+    pub parent_name: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ParamMetadata {
+    pub span: Span,
+    pub name_span: Option<Span>,
+    pub type_span: Span,
+    pub role: ParamRole,
+}
+
+#[derive(Debug, Clone)]
+pub struct ActorMetadata {
+    pub span: Span,
+    pub name_span: Option<Span>,
+    pub docs: Option<String>,
+    pub definition: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PrimitiveHover {
+    Prim(PrimType),
+    Blob,
+}
 
 #[derive(Error, Debug)]
 pub enum SemanticError {
@@ -42,17 +124,35 @@ impl SemanticError {
 pub struct Semantic {
     pub table: SymbolTable,
     pub ident_range: IdentRangeLapper,
+    pub fields: IndexVec<FieldId, FieldMetadata>,
+    pub service_methods: IndexVec<MethodId, MethodMetadata>,
+    pub params: IndexVec<ParamId, ParamMetadata>,
+    pub symbol_ident_spans: IndexVec<SymbolId, Option<Span>>,
+    pub type_docs: IndexVec<SymbolId, Option<TypeDoc>>,
+    pub primitive_spans: Vec<(Span, PrimitiveHover)>,
+    pub keyword_spans: Vec<(Span, KeywordDoc)>,
+    pub actor: Option<ActorMetadata>,
 }
 
 impl Semantic {}
 
 #[derive(Debug)]
-pub struct Ctx {
+pub struct Ctx<'a> {
     env: im_rc::Vector<(String, Span)>,
     table: SymbolTable,
+    fields: IndexVec<FieldId, FieldMetadata>,
+    service_methods: IndexVec<MethodId, MethodMetadata>,
+    params: IndexVec<ParamId, ParamMetadata>,
+    rope: &'a Rope,
+    symbol_ident_spans: IndexVec<SymbolId, Option<Span>>,
+    type_docs: IndexVec<SymbolId, Option<TypeDoc>>,
+    primitive_spans: Vec<(Span, PrimitiveHover)>,
+    keyword_spans: Vec<(Span, KeywordDoc)>,
+    actor: Option<ActorMetadata>,
+    type_name_stack: Vec<Option<String>>,
 }
 
-impl Ctx {
+impl<'a> Ctx<'a> {
     fn find_symbol(&self, name: &str) -> Option<Span> {
         self.env
             .iter()
@@ -60,30 +160,183 @@ impl Ctx {
             .find_map(|(n, t)| if n == name { Some(t.clone()) } else { None })
     }
 
+    fn push_type_name(&mut self, name: Option<String>) {
+        self.type_name_stack.push(name);
+    }
+
+    fn pop_type_name(&mut self) {
+        self.type_name_stack.pop();
+    }
+
+    fn current_type_name(&self) -> Option<String> {
+        self.type_name_stack
+            .iter()
+            .rev()
+            .find_map(|name| name.clone())
+    }
+
     fn declare_symbol<S: Into<String>>(&mut self, name: S, span: Span) -> SymbolId {
         let name = name.into();
         let symbol_id = self.table.add_symbol(span.clone());
+        self.register_symbol_slot();
         self.env.push_back((name, span));
         symbol_id
     }
+
+    fn register_symbol_slot(&mut self) {
+        self.symbol_ident_spans.push(None);
+        self.type_docs.push(None);
+    }
+
+    fn register_field(&mut self, field: &TypeField) {
+        let label_span = compute_field_label_span(field, self.rope);
+        let type_span = if field.typ.span.start < field.typ.span.end {
+            Some(field.typ.span.clone())
+        } else {
+            None
+        };
+
+        let metadata = FieldMetadata {
+            span: field.span.clone(),
+            label_span: label_span.clone(),
+            type_span,
+            docs: format_docs(&field.docs),
+            parent_name: self.current_type_name(),
+        };
+        self.fields.push(metadata);
+    }
+
+    fn register_service_method(&mut self, binding: &Binding, parent_name: Option<String>) {
+        let name_span = compute_binding_ident_span(binding, self.rope);
+        let type_span = if binding.typ.span.start < binding.typ.span.end {
+            Some(binding.typ.span.clone())
+        } else {
+            None
+        };
+
+        let metadata = MethodMetadata {
+            span: binding.span.clone(),
+            name_span,
+            type_span,
+            docs: format_docs(&binding.docs),
+            parent_name,
+        };
+        self.service_methods.push(metadata);
+    }
+
+    fn register_function_params(&mut self, func_type: &FuncType, func_span: &Span) {
+        let mut cursor = args_region_start(self.rope, func_span);
+        for arg in func_type.args.iter() {
+            if cursor > arg.span.start {
+                cursor = arg.span.start;
+            }
+            let search_span = cursor..arg.span.start;
+            let name_span = compute_param_name_span(self.rope, &search_span);
+            let span_start = name_span
+                .as_ref()
+                .map(|span| span.start)
+                .unwrap_or(arg.span.start);
+            let span = span_start..arg.span.end;
+            let metadata = ParamMetadata {
+                span,
+                name_span,
+                type_span: arg.span.clone(),
+                role: ParamRole::Argument,
+            };
+            self.params.push(metadata);
+            cursor = arg.span.end;
+        }
+    }
+
+    fn register_primitive(&mut self, span: &Span, kind: &PrimType) {
+        if span.start >= span.end {
+            return;
+        }
+        if let Some(prim_span) =
+            find_identifier_span(self.rope, span.clone(), primitive_keyword(kind), false)
+        {
+            self.primitive_spans
+                .push((prim_span, PrimitiveHover::Prim(kind.clone())));
+        }
+    }
+
+    fn register_blob(&mut self, span: &Span) {
+        if span.start >= span.end {
+            return;
+        }
+        if let Some(blob_span) = find_identifier_span(self.rope, span.clone(), "blob", false) {
+            self.primitive_spans.push((blob_span, PrimitiveHover::Blob));
+        }
+    }
+
+    fn register_keyword(&mut self, span: Span, keyword: KeywordDoc) {
+        self.register_keyword_within(span, keyword, false);
+    }
+
+    fn register_keyword_from_end(&mut self, span: Span, keyword: KeywordDoc) {
+        self.register_keyword_within(span, keyword, true);
+    }
+
+    fn register_keyword_within(&mut self, span: Span, keyword: KeywordDoc, from_end: bool) {
+        if span.start >= span.end {
+            return;
+        }
+        if let Some(keyword_span) =
+            find_identifier_span(self.rope, span, keyword.keyword(), from_end)
+        {
+            self.keyword_spans.push((keyword_span, keyword));
+        }
+    }
 }
 
-pub fn analyze_program(ast: &IDLProg) -> Result<Semantic> {
+pub fn analyze_program(ast: &IDLProg, rope: &Rope) -> Result<Semantic> {
     let table = SymbolTable::default();
     let env = im_rc::Vector::new();
-    let mut ctx = Ctx { env, table };
+    let fields = IndexVec::new();
+    let service_methods = IndexVec::new();
+    let params = IndexVec::new();
+    let mut ctx = Ctx {
+        env,
+        table,
+        fields,
+        service_methods,
+        params,
+        rope,
+        symbol_ident_spans: IndexVec::new(),
+        type_docs: IndexVec::new(),
+        primitive_spans: Vec::new(),
+        keyword_spans: Vec::new(),
+        actor: None,
+        type_name_stack: Vec::new(),
+    };
     for dec in ast.decs.iter() {
         match dec {
             Dec::TypD(binding) => {
-                ctx.declare_symbol(binding.id.clone(), binding.span.clone());
+                ctx.register_keyword(binding.span.clone(), KeywordDoc::Type);
+                let symbol_id = ctx.declare_symbol(binding.id.clone(), binding.span.clone());
+                if let Some(ident_span) = compute_binding_ident_span(binding, rope)
+                    && let Some(slot) = ctx.symbol_ident_spans.get_mut(symbol_id)
+                {
+                    *slot = Some(ident_span);
+                }
+                if let Some(slot) = ctx.type_docs.get_mut(symbol_id) {
+                    let rendered = render_binding(binding);
+                    let doc_block = format_docs(&binding.docs);
+                    *slot = Some(TypeDoc {
+                        definition: rendered,
+                        docs: doc_block,
+                    });
+                }
             }
             Dec::ImportType { path, span } => {
                 ctx.table
                     .add_import(span.clone(), path.clone(), ImportKind::Type);
+                ctx.register_symbol_slot();
             }
             Dec::ImportServ { path, span } => {
                 ctx.table
                     .add_import(span.clone(), path.clone(), ImportKind::Service);
+                ctx.register_symbol_slot();
             }
         }
     }
@@ -98,9 +351,14 @@ pub fn analyze_program(ast: &IDLProg) -> Result<Semantic> {
 
     let mut ident_range = IdentRangeLapper::new(vec![]);
     for (symbol_id, range) in ctx.table.symbol_id_to_span.iter_enumerated() {
+        let span = ctx
+            .symbol_ident_spans
+            .get(symbol_id)
+            .and_then(|opt| opt.clone())
+            .unwrap_or_else(|| range.clone());
         ident_range.insert(Interval {
-            start: range.start,
-            stop: range.end,
+            start: span.start,
+            stop: span.end,
             val: IdentType::Binding(symbol_id),
         });
     }
@@ -112,15 +370,90 @@ pub fn analyze_program(ast: &IDLProg) -> Result<Semantic> {
             val: IdentType::Reference(reference_id),
         });
     }
+    for (field_id, metadata) in ctx.fields.iter_enumerated() {
+        if let Some(label_span) = &metadata.label_span {
+            ident_range.insert(Interval {
+                start: label_span.start,
+                stop: label_span.end,
+                val: IdentType::Field(field_id, FieldPart::Label),
+            });
+        }
+        if let Some(type_span) = &metadata.type_span
+            && type_span.start < type_span.end
+            && metadata.label_span.as_ref() != Some(type_span)
+        {
+            ident_range.insert(Interval {
+                start: type_span.start,
+                stop: type_span.end,
+                val: IdentType::Field(field_id, FieldPart::Type),
+            });
+        }
+    }
+    for (method_id, metadata) in ctx.service_methods.iter_enumerated() {
+        if let Some(name_span) = &metadata.name_span {
+            ident_range.insert(Interval {
+                start: name_span.start,
+                stop: name_span.end,
+                val: IdentType::ServiceMethod(method_id),
+            });
+        }
+    }
+    for (param_id, metadata) in ctx.params.iter_enumerated() {
+        if let Some(name_span) = &metadata.name_span {
+            ident_range.insert(Interval {
+                start: name_span.start,
+                stop: name_span.end,
+                val: IdentType::FuncParam(param_id),
+            });
+        }
+    }
+    for (span, kind) in ctx.primitive_spans.iter() {
+        if span.start < span.end {
+            ident_range.insert(Interval {
+                start: span.start,
+                stop: span.end,
+                val: IdentType::Primitive(kind.clone()),
+            });
+        }
+    }
+    for (span, keyword) in ctx.keyword_spans.iter() {
+        if span.start < span.end {
+            ident_range.insert(Interval {
+                start: span.start,
+                stop: span.end,
+                val: IdentType::Keyword(*keyword),
+            });
+        }
+    }
+    if let Some(actor) = &ctx.actor && let Some(name_span) = &actor.name_span && name_span.start < name_span.end {
+        ident_range.insert(Interval {
+            start: name_span.start,
+            stop: name_span.end,
+            val: IdentType::Actor,
+        });
+    }
     Ok(Semantic {
         table: ctx.table,
         ident_range,
+        fields: ctx.fields,
+        service_methods: ctx.service_methods,
+        params: ctx.params,
+        symbol_ident_spans: ctx.symbol_ident_spans,
+        type_docs: ctx.type_docs,
+        primitive_spans: ctx.primitive_spans,
+        keyword_spans: ctx.keyword_spans,
+        actor: ctx.actor,
     })
 }
 
 fn analyze_dec(dec: &Dec, ctx: &mut Ctx) -> Result<()> {
     match dec {
-        Dec::TypD(binding) => analyze_binding(binding, ctx),
+        Dec::TypD(binding) => {
+            ctx.push_type_name(Some(binding.id.clone()));
+            let result = analyze_binding(binding, ctx);
+            ctx.pop_type_name();
+            result
+        }
         Dec::ImportType { .. } | Dec::ImportServ { .. } => Ok(()),
     }
 }
@@ -131,7 +464,12 @@ fn analyze_binding(binding: &Binding, ctx: &mut Ctx) -> Result<()> {
 
 fn analyze_type(idl_type: &IDLTypeWithSpan, ctx: &mut Ctx) -> Result<()> {
     match &idl_type.kind {
-        IDLType::PrimT(_) | IDLType::PrincipalT => {}
+        IDLType::PrimT(kind) => {
+            ctx.register_primitive(&idl_type.span, kind);
+        }
+        IDLType::PrincipalT => {
+            ctx.register_keyword(idl_type.span.clone(), KeywordDoc::Principal);
+        }
         IDLType::VarT(name) => {
             let span = match ctx.find_symbol(name) {
                 Some(span) => span,
@@ -148,6 +486,22 @@ fn analyze_type(idl_type: &IDLTypeWithSpan, ctx: &mut Ctx) -> Result<()> {
             }
         }
         IDLType::FuncT(func_type) => {
+            ctx.register_keyword(idl_type.span.clone(), KeywordDoc::Func);
+            ctx.register_function_params(func_type, &idl_type.span);
+            for mode in func_type.modes.iter() {
+                match mode {
+                    FuncMode::Query => {
+                        ctx.register_keyword_from_end(idl_type.span.clone(), KeywordDoc::Query)
+                    }
+                    FuncMode::CompositeQuery => ctx.register_keyword_from_end(
+                        idl_type.span.clone(),
+                        KeywordDoc::CompositeQuery,
+                    ),
+                    FuncMode::Oneway => {
+                        ctx.register_keyword_from_end(idl_type.span.clone(), KeywordDoc::Oneway)
+                    }
+                }
+            }
             for arg in func_type.args.iter() {
                 analyze_type(arg, ctx)?;
             }
@@ -155,14 +509,31 @@ fn analyze_type(idl_type: &IDLTypeWithSpan, ctx: &mut Ctx) -> Result<()> {
                 analyze_type(ret, ctx)?;
             }
         }
-        IDLType::OptT(inner) | IDLType::VecT(inner) => {
+        IDLType::OptT(inner) => {
+            ctx.register_keyword(idl_type.span.clone(), KeywordDoc::Opt);
             analyze_type(inner, ctx)?;
         }
-        IDLType::RecordT(type_fields) | IDLType::VariantT(type_fields) => {
+        IDLType::VecT(inner) => {
+            if is_blob(&idl_type.span, ctx.rope) {
+                ctx.register_blob(&idl_type.span);
+            } else {
+                ctx.register_keyword(idl_type.span.clone(), KeywordDoc::Vec);
+            }
+            analyze_type(inner, ctx)?;
+        }
+        IDLType::RecordT(type_fields) => {
+            ctx.register_keyword(idl_type.span.clone(), KeywordDoc::Record);
+            analyze_type_fields(type_fields, ctx)?;
+        }
+        IDLType::VariantT(type_fields) => {
+            ctx.register_keyword(idl_type.span.clone(), KeywordDoc::Variant);
             analyze_type_fields(type_fields, ctx)?;
         }
         IDLType::ServT(bindings) => {
+            ctx.register_keyword(idl_type.span.clone(), KeywordDoc::Service);
+            let parent_name = ctx.current_type_name();
             for binding in bindings.iter() {
+                ctx.register_service_method(binding, parent_name.clone());
                 analyze_binding(binding, ctx)?;
             }
         }
@@ -178,11 +549,225 @@ fn analyze_type(idl_type: &IDLTypeWithSpan, ctx: &mut Ctx) -> Result<()> {
 
 fn analyze_type_fields(fields: &[TypeField], ctx: &mut Ctx) -> Result<()> {
     for field in fields.iter() {
+        ctx.register_field(field);
         analyze_type(&field.typ, ctx)?;
     }
     Ok(())
 }
 
 fn analyze_actor(actor: &IDLActorType, ctx: &mut Ctx) -> Result<()> {
-    analyze_type(&actor.typ, ctx)
+    ctx.register_keyword(actor.span.clone(), KeywordDoc::Service);
+    let docs = format_docs(&actor.docs);
+    let name_span = compute_actor_name_span(actor, ctx.rope);
+    let name_text = name_span
+        .as_ref()
+        .map(|span| ctx.rope.slice(span.clone()).to_string());
+    let definition = render_actor_declaration(name_text.as_deref(), &actor.typ);
+    ctx.actor = Some(ActorMetadata {
+        span: actor.span.clone(),
+        name_span,
+        docs,
+        definition,
+    });
+    ctx.push_type_name(name_text);
+    let result = analyze_type(&actor.typ, ctx);
+    ctx.pop_type_name();
+    result
+}
+
+fn compute_actor_name_span(actor: &IDLActorType, rope: &Rope) -> Option<Span> {
+    let colon_pos = find_char_in_span(rope, &actor.span, ':')?;
+    let search_span = actor.span.start..colon_pos;
+    let text = rope.slice(search_span.clone()).to_string();
+    let trimmed = text.trim_start();
+    let without_keyword = trimmed.strip_prefix("service")?.trim_start();
+    if without_keyword.is_empty() {
+        return None;
+    }
+    let name = without_keyword.split_whitespace().next()?;
+    if name.is_empty() {
+        return None;
+    }
+    find_identifier_span(rope, search_span, name, false)
+}
+
+fn compute_binding_ident_span(binding: &Binding, rope: &Rope) -> Option<Span> {
+    if binding.id.is_empty() {
+        return None;
+    }
+
+    let start = binding.span.start;
+    let mut end = binding.typ.span.start;
+    if end <= start {
+        end = binding.span.end;
+    }
+    if end <= start {
+        return None;
+    }
+
+    find_identifier_span(rope, start..end, &binding.id, true)
+}
+
+fn compute_field_label_span(field: &TypeField, rope: &Rope) -> Option<Span> {
+    let label_text = match &field.label {
+        Label::Named(name) => name.clone(),
+        Label::Id(id) | Label::Unnamed(id) => id.to_string(),
+    };
+
+    if label_text.is_empty() {
+        return None;
+    }
+
+    let start = field.span.start;
+    let mut end = field.typ.span.start;
+    if end <= start {
+        end = field.span.end;
+    }
+    if end <= start {
+        return None;
+    }
+
+    find_identifier_span(rope, start..end, &label_text, true)
+}
+
+fn args_region_start(rope: &Rope, span: &Span) -> usize {
+    match find_char_in_span(rope, span, '(') {
+        Some(pos) => pos + 1,
+        None => span.start,
+    }
+}
+
+fn find_char_in_span(rope: &Rope, span: &Span, ch: char) -> Option<usize> {
+    if span.start >= span.end {
+        return None;
+    }
+    let text = rope.slice(span.start..span.end).to_string();
+    let byte_idx = text.find(ch)?;
+    let char_offset = text[..byte_idx].chars().count();
+    Some(span.start + char_offset)
+}
+
+fn compute_param_name_span(rope: &Rope, search_span: &Span) -> Option<Span> {
+    if search_span.start >= search_span.end {
+        return None;
+    }
+    let text = rope.slice(search_span.start..search_span.end).to_string();
+    let colon_idx = text.rfind(':')?;
+    let before = &text[..colon_idx];
+    let candidate = before.rsplit(['(', ',']).next().unwrap_or(before);
+    let name = candidate.trim();
+    if name.is_empty() {
+        return None;
+    }
+    find_identifier_span(rope, search_span.clone(), name, true)
+}
+
+fn span_text_eq(rope: &Rope, span: &Span, needle: &str) -> bool {
+    if span.start >= span.end {
+        return false;
+    }
+    rope.slice(span.start..span.end).to_string().trim() == needle
+}
+
+fn is_blob(span: &Span, rope: &Rope) -> bool {
+    span_text_eq(rope, span, "blob")
+}
+
+fn find_identifier_span(rope: &Rope, span: Span, needle: &str, from_end: bool) -> Option<Span> {
+    if needle.is_empty() || span.start >= span.end {
+        return None;
+    }
+
+    let text = rope.slice(span.start..span.end).to_string();
+    let idx = if from_end {
+        text.rmatch_indices(needle).next()?.0
+    } else {
+        text.find(needle)?
+    };
+
+    let leading_chars = text[..idx].chars().count();
+    let start = span.start + leading_chars;
+    let len_chars = needle.chars().count();
+    Some(start..start + len_chars)
+}
+
+fn primitive_keyword(kind: &PrimType) -> &'static str {
+    match kind {
+        PrimType::Nat => "nat",
+        PrimType::Nat8 => "nat8",
+        PrimType::Nat16 => "nat16",
+        PrimType::Nat32 => "nat32",
+        PrimType::Nat64 => "nat64",
+        PrimType::Int => "int",
+        PrimType::Int8 => "int8",
+        PrimType::Int16 => "int16",
+        PrimType::Int32 => "int32",
+        PrimType::Int64 => "int64",
+        PrimType::Float32 => "float32",
+        PrimType::Float64 => "float64",
+        PrimType::Bool => "bool",
+        PrimType::Text => "text",
+        PrimType::Null => "null",
+        PrimType::Reserved => "reserved",
+        PrimType::Empty => "empty",
+    }
+}
+
+fn format_docs(docs: &[String]) -> Option<String> {
+    if docs.is_empty() {
+        return None;
+    }
+    let mut lines = Vec::new();
+    for doc in docs {
+        let trimmed = doc.trim().trim_start_matches('/').trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        lines.push(trimmed.to_string());
+    }
+    if lines.is_empty() {
+        None
+    } else {
+        Some(annotate_code_fences(&lines.join("\n")))
+    }
+}
+
+fn annotate_code_fences(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let bytes = text.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    let mut in_code = false;
+    while i < len {
+        if i + 3 <= len && &bytes[i..i + 3] == b"```" {
+            result.push_str("```");
+            i += 3;
+            if !in_code {
+                result.push_str("candid");
+                in_code = true;
+            } else {
+                in_code = false;
+            }
+            continue;
+        }
+        let ch = text[i..].chars().next().unwrap();
+        if ch == '\n' {
+            if in_code {
+                result.push('\n');
+            } else {
+                result.push_str("  \n");
+            }
+        } else if ch == '\r' {
+            // Preserve Windows line endings but still enforce Markdown break
+            if in_code {
+                result.push('\r');
+            } else {
+                result.push_str("  \r");
+            }
+        } else {
+            result.push(ch);
+        }
+        i += ch.len_utf8();
+    }
+    result
 }

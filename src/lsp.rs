@@ -30,6 +30,8 @@ pub mod semantic_analyze;
 pub mod semantic_token;
 pub mod span;
 pub mod symbol_table;
+pub mod type_display;
+pub mod type_docs;
 
 use hover::hover;
 use semantic_token::LEGEND_TYPES;
@@ -308,7 +310,7 @@ impl CandidLanguageServer {
         }
 
         if let Some(ast) = ast {
-            match analyze_program(&ast) {
+            match analyze_program(&ast, &rope) {
                 Ok(semantic) => {
                     self.semantic_map.insert(uri_key.clone(), semantic);
                 }

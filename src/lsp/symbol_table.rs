@@ -12,6 +12,7 @@ oxc_index::define_index_type! {
     pub struct ReferenceId = u32;
     IMPL_RAW_CONVERSIONS = true;
 }
+
 /// Lookup from symbol identifiers to the span where they were declared.
 pub type SymbolIdToSpan = IndexVec<SymbolId, Span>;
 
