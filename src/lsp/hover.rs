@@ -36,10 +36,10 @@ pub fn hover(server: &CandidLanguageServer, params: HoverParams) -> Result<Optio
 /// Compose hover markup for the identifier located at `info.ident_span`.
 ///
 /// The rendering pipeline has three steps:
-/// 1. `HoverContext` snapshots the current Rope/Semantic state.
-/// 2. `HoverBuilder` classifies the identifier into a `HoverSubject`.
+/// 1. [`HoverContext`] snapshots the current Rope/Semantic state.
+/// 2. [`HoverBuilder`] classifies the identifier into a `HoverSubject`.
 /// 3. The builder converts that subject plus any reference metadata into
-///    ordered Markdown sections (`HoverSection`) before returning a LSP hover.
+///    ordered Markdown sections via [`HoverWriter`] before returning a LSP hover.
 pub fn hover_contents(
     rope: &Rope,
     semantic: &Semantic,
@@ -85,14 +85,14 @@ impl<'a> HoverContext<'a> {
 /// Incrementally assembles Markdown sections for a hover response.
 struct HoverBuilder<'a> {
     context: HoverContext<'a>,
-    sections: Vec<HoverSection>,
+    writer: HoverWriter,
 }
 
 impl<'a> HoverBuilder<'a> {
     fn new(context: HoverContext<'a>) -> Self {
         Self {
             context,
-            sections: Vec::new(),
+            writer: HoverWriter::new(),
         }
     }
 
@@ -101,16 +101,7 @@ impl<'a> HoverBuilder<'a> {
         self.collect_reference_sections();
         self.collect_definition_fallback();
 
-        if self.sections.is_empty() {
-            return None;
-        }
-
-        let value = self
-            .sections
-            .into_iter()
-            .map(|section| section.render())
-            .collect::<Vec<_>>()
-            .join("\n\n");
+        let value = self.writer.into_value()?;
 
         Some(HoverContents::Markup(MarkupContent {
             kind: MarkupKind::Markdown,
@@ -126,7 +117,7 @@ impl<'a> HoverBuilder<'a> {
         let subject = self.extract_subject();
         match subject {
             HoverSubject::Param { snippet } => {
-                self.sections.push(HoverSection::code_block(snippet));
+                self.writer.push_code_block(snippet);
             }
             HoverSubject::Method {
                 parent,
@@ -134,12 +125,12 @@ impl<'a> HoverBuilder<'a> {
                 docs,
             } => {
                 if let Some(parent) = parent {
-                    self.sections.push(HoverSection::code_block(parent));
+                    self.writer.push_code_block(parent);
                 }
-                push_snippet_with_docs(&mut self.sections, snippet, docs);
+                push_snippet_with_docs(&mut self.writer, snippet, docs);
             }
             HoverSubject::Actor { snippet, docs } => {
-                push_snippet_with_docs(&mut self.sections, snippet, docs);
+                push_snippet_with_docs(&mut self.writer, snippet, docs);
             }
             HoverSubject::Field {
                 parent,
@@ -147,15 +138,15 @@ impl<'a> HoverBuilder<'a> {
                 docs,
             } => {
                 if let Some(parent) = parent {
-                    self.sections.push(HoverSection::code_block(parent));
+                    self.writer.push_code_block(parent);
                 }
-                push_snippet_with_docs(&mut self.sections, snippet, docs);
+                push_snippet_with_docs(&mut self.writer, snippet, docs);
             }
             HoverSubject::TypeDoc { definition, docs } => {
-                push_snippet_with_docs(&mut self.sections, definition, docs);
+                push_snippet_with_docs(&mut self.writer, definition, docs);
             }
             HoverSubject::Ident { snippet } => {
-                self.sections.push(HoverSection::code_block(snippet));
+                self.writer.push_code_block(snippet);
             }
             HoverSubject::None => {}
         }
@@ -169,11 +160,11 @@ impl<'a> HoverBuilder<'a> {
                 PrimitiveHover::Prim(kind) => primitive_doc(kind),
                 PrimitiveHover::Blob => blob_doc(),
             };
-            self.sections.push(HoverSection::text(doc));
+            self.writer.push_text(doc);
         }
 
         if let Some(keyword) = info.keyword.and_then(keyword_doc) {
-            self.sections.push(HoverSection::text(keyword));
+            self.writer.push_text(keyword);
         }
 
         if let Some(import) = &info.import {
@@ -181,22 +172,20 @@ impl<'a> HoverBuilder<'a> {
                 ImportKind::Type => "type",
                 ImportKind::Service => "service",
             };
-            self.sections.push(HoverSection::text(format!(
-                "Imported {kind} from `{}`",
-                import.path
-            )));
+            self.writer
+                .push_text(format!("Imported {kind} from `{}`", import.path));
         }
     }
 
     fn collect_definition_fallback(&mut self) {
         let info = self.context.info();
         if let Some(def_span) = &info.definition_span
-            && self.sections.is_empty()
+            && self.writer.is_empty()
             && def_span != &info.ident_span
             && let Some(def_snippet) = self.context.snippet_from(def_span)
         {
-            self.sections
-                .push(HoverSection::text(format!("Definition: `{def_snippet}`")));
+            self.writer
+                .push_text(format!("Definition: `{def_snippet}`"));
         }
     }
 
@@ -290,35 +279,53 @@ enum HoverSubject {
     None,
 }
 
-#[derive(Clone)]
-enum HoverSection {
-    CodeBlock {
-        language: &'static str,
-        code: String,
-    },
-    Text(String),
-    Rule,
+struct HoverWriter {
+    buffer: String,
+    sections: usize,
 }
 
-impl HoverSection {
-    fn code_block(code: String) -> Self {
-        HoverSection::CodeBlock {
-            language: "candid",
-            code,
+impl HoverWriter {
+    fn new() -> Self {
+        Self {
+            buffer: String::new(),
+            sections: 0,
         }
     }
 
-    fn text<T: Into<String>>(value: T) -> Self {
-        HoverSection::Text(value.into())
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.sections == 0
     }
 
-    fn render(self) -> String {
-        match self {
-            HoverSection::CodeBlock { language, code } => {
-                format!("```{language}\n{code}\n```")
-            }
-            HoverSection::Text(text) => text,
-            HoverSection::Rule => "---".to_string(),
+    fn push_text(&mut self, text: impl AsRef<str>) {
+        self.start_section();
+        self.buffer.push_str(text.as_ref());
+    }
+
+    fn push_code_block(&mut self, code: String) {
+        self.start_section();
+        self.buffer.push_str("```candid\n");
+        self.buffer.push_str(&code);
+        self.buffer.push_str("\n```");
+    }
+
+    fn push_rule(&mut self) {
+        self.start_section();
+        self.buffer.push_str("---");
+    }
+
+    fn start_section(&mut self) {
+        if self.sections > 0 {
+            self.buffer.push_str("\n\n");
+        }
+        self.sections += 1;
+    }
+
+    fn into_value(self) -> Option<String> {
+        if self.sections == 0 {
+            None
+        } else {
+            Some(self.buffer)
         }
     }
 }
@@ -345,15 +352,15 @@ pub fn snippet_from_span(rope: &Rope, span: &Span) -> Option<String> {
     Some(snippet)
 }
 
-fn push_snippet_with_docs(sections: &mut Vec<HoverSection>, snippet: String, docs: Option<String>) {
-    sections.push(HoverSection::code_block(snippet));
-    push_docs_section(sections, docs);
+fn push_snippet_with_docs(writer: &mut HoverWriter, snippet: String, docs: Option<String>) {
+    writer.push_code_block(snippet);
+    push_docs_section(writer, docs);
 }
 
-fn push_docs_section(sections: &mut Vec<HoverSection>, docs: Option<String>) {
+fn push_docs_section(writer: &mut HoverWriter, docs: Option<String>) {
     if let Some(doc) = docs {
-        sections.push(HoverSection::Rule);
-        sections.push(HoverSection::text(doc));
+        writer.push_rule();
+        writer.push_text(doc);
     }
 }
 
