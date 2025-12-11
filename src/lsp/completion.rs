@@ -1,5 +1,4 @@
 use crate::lsp::{
-    tasks::{DocumentTaskCancelled, DocumentTaskKind, DocumentTaskToken},
     CandidLanguageServer,
     config::{CompletionEngineMode, ServiceSnippetStyle},
     markdown,
@@ -9,6 +8,7 @@ use crate::lsp::{
     },
     span::Span,
     symbol_table::{ImportEntry, ImportKind, SymbolId},
+    tasks::{DocumentTaskKind, DocumentTaskToken},
     type_docs::{
         KeywordDoc, TypeDoc, blob_doc, keyword_doc, keyword_kinds, primitive_doc, primitive_kinds,
         primitive_name,
@@ -27,7 +27,6 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     sync::Arc,
 };
-use tokio::task::yield_now;
 use tower_lsp_server::{
     jsonrpc::Result,
     ls_types::{
@@ -87,12 +86,45 @@ enum CompletionBuildOutcome {
     Cancelled,
 }
 
-async fn yield_and_check(
-    token: &DocumentTaskToken,
-) -> std::result::Result<(), DocumentTaskCancelled> {
-    yield_now().await;
-    token.ensure_active()
+struct BuildCompletionItemsParams<'a> {
+    context: CompletionContext,
+    semantic_ref: Option<&'a Semantic>,
+    rope: &'a Rope,
+    snippet_style: ServiceSnippetStyle,
+    scope_index: Option<&'a ScopeBindingIndex>,
+    offset: Option<usize>,
+    inside_service_block: bool,
+    cursor_context: Option<&'a CursorContext>,
+    lightweight: bool,
 }
+
+impl<'a> BuildCompletionItemsParams<'a> {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        context: CompletionContext,
+        semantic_ref: Option<&'a Semantic>,
+        rope: &'a Rope,
+        snippet_style: ServiceSnippetStyle,
+        scope_index: Option<&'a ScopeBindingIndex>,
+        offset: Option<usize>,
+        inside_service_block: bool,
+        cursor_context: Option<&'a CursorContext>,
+        lightweight: bool,
+    ) -> Self {
+        Self {
+            context,
+            semantic_ref,
+            rope,
+            snippet_style,
+            scope_index,
+            offset,
+            inside_service_block,
+            cursor_context,
+            lightweight,
+        }
+    }
+}
+
 
 #[cfg(feature = "tracing")]
 impl<'a> Drop for PhaseTimer<'a> {
@@ -468,15 +500,17 @@ pub async fn completion(
         #[cfg(feature = "tracing")]
         let _build_timer = PhaseTimer::new(&uri_key, "build_completion_items");
         match build_completion_items_async(
-            context,
-            semantic_ref,
-            &rope,
-            snippet_style,
-            scope_index,
-            offset,
-            inside_service_block,
-            cursor_context.as_ref(),
-            is_lightweight,
+            BuildCompletionItemsParams::new(
+                context,
+                semantic_ref,
+                &rope,
+                snippet_style,
+                scope_index,
+                offset,
+                inside_service_block,
+                cursor_context.as_ref(),
+                is_lightweight,
+            ),
             token,
         )
         .await
@@ -526,17 +560,18 @@ fn top_level_completion_items() -> Vec<CompletionItem> {
 }
 
 #[cfg_attr(not(any(test, feature = "bench")), allow(dead_code))]
-fn build_completion_items_sync(
-    context: CompletionContext,
-    semantic_ref: Option<&Semantic>,
-    rope: &Rope,
-    snippet_style: ServiceSnippetStyle,
-    scope_index: Option<&ScopeBindingIndex>,
-    offset: Option<usize>,
-    inside_service_block: bool,
-    cursor_context: Option<&CursorContext>,
-    lightweight: bool,
-) -> Vec<CompletionItem> {
+fn build_completion_items_sync(params: BuildCompletionItemsParams<'_>) -> Vec<CompletionItem> {
+    let BuildCompletionItemsParams {
+        context,
+        semantic_ref,
+        rope,
+        snippet_style,
+        scope_index,
+        offset,
+        inside_service_block,
+        cursor_context,
+        lightweight,
+    } = params;
     let mut items = Vec::new();
     let mut seen: HashSet<(String, Option<String>), RandomState> =
         HashSet::with_hasher(RandomState::new());
@@ -616,18 +651,21 @@ fn build_completion_items_sync(
 }
 
 async fn build_completion_items_async(
-    context: CompletionContext,
-    semantic_ref: Option<&Semantic>,
-    rope: &Rope,
-    snippet_style: ServiceSnippetStyle,
-    scope_index: Option<&ScopeBindingIndex>,
-    offset: Option<usize>,
-    inside_service_block: bool,
-    cursor_context: Option<&CursorContext>,
-    lightweight: bool,
+    params: BuildCompletionItemsParams<'_>,
     token: DocumentTaskToken,
 ) -> CompletionBuildOutcome {
-    if yield_and_check(&token).await.is_err() {
+    let BuildCompletionItemsParams {
+        context,
+        semantic_ref,
+        rope,
+        snippet_style,
+        scope_index,
+        offset,
+        inside_service_block,
+        cursor_context,
+        lightweight,
+    } = params;
+    if token.yield_and_check().await.is_err() {
         return CompletionBuildOutcome::Cancelled;
     }
     let mut items = Vec::new();
@@ -688,7 +726,7 @@ async fn build_completion_items_async(
         }
     }
 
-    if yield_and_check(&token).await.is_err() {
+    if token.yield_and_check().await.is_err() {
         return CompletionBuildOutcome::Cancelled;
     }
 
@@ -709,7 +747,7 @@ async fn build_completion_items_async(
         append_sorted_items(&mut items, &mut seen, service_items);
     }
 
-    if yield_and_check(&token).await.is_err() {
+    if token.yield_and_check().await.is_err() {
         return CompletionBuildOutcome::Cancelled;
     }
 
@@ -1342,15 +1380,17 @@ pub mod bench_support {
                 .as_ref()
                 .and_then(|cache| cache.scope_index(Some(&self.semantic), None));
             build_completion_items_sync(
-                context,
-                Some(&self.semantic),
-                &self.rope,
-                style,
-                scope_index,
-                Some(offset),
-                cursor_context.inside_service_block(),
-                Some(&cursor_context),
-                false,
+                BuildCompletionItemsParams::new(
+                    context,
+                    Some(&self.semantic),
+                    &self.rope,
+                    style,
+                    scope_index,
+                    Some(offset),
+                    cursor_context.inside_service_block(),
+                    Some(&cursor_context),
+                    false,
+                ),
             )
             .len()
         }
@@ -1996,7 +2036,7 @@ mod tests {
         let scope_index = ScopeBindingIndex::from_semantic(&semantic);
 
         let offset = text.find("set_value").expect("set_value span");
-        let items = build_completion_items_sync(
+        let items = build_completion_items_sync(BuildCompletionItemsParams::new(
             CompletionContext::Value,
             Some(&semantic),
             &rope,
@@ -2006,7 +2046,7 @@ mod tests {
             false,
             None,
             true,
-        );
+        ));
 
         assert!(
             items.iter().any(
@@ -2047,15 +2087,17 @@ mod tests {
         let token = task_state.token(DocumentTaskKind::Completion);
 
         let build_future = build_completion_items_async(
-            CompletionContext::Value,
-            Some(&semantic),
-            &rope,
-            ServiceSnippetStyle::Call,
-            scope_index.as_ref(),
-            Some(offset),
-            cursor_context.inside_service_block(),
-            Some(&cursor_context),
-            false,
+            BuildCompletionItemsParams::new(
+                CompletionContext::Value,
+                Some(&semantic),
+                &rope,
+                ServiceSnippetStyle::Call,
+                scope_index.as_ref(),
+                Some(offset),
+                cursor_context.inside_service_block(),
+                Some(&cursor_context),
+                false,
+            ),
             token,
         );
 

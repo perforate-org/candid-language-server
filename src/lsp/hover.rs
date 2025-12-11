@@ -6,6 +6,7 @@ use crate::lsp::{
     span::Span,
     span_to_range,
     symbol_table::ImportKind,
+    tasks::{DocumentTaskCancelled, DocumentTaskKind, DocumentTaskToken},
     type_docs::{TypeDoc, blob_doc, keyword_doc, primitive_doc},
 };
 use rapidhash::fast::RandomState;
@@ -13,29 +14,53 @@ use ropey::Rope;
 use std::{collections::HashMap, sync::Arc};
 use tower_lsp_server::{jsonrpc::Result, ls_types::*};
 
-pub fn hover(server: &CandidLanguageServer, params: HoverParams) -> Result<Option<Hover>> {
-    let response = (|| {
-        let uri = params.text_document_position_params.text_document.uri;
-        let uri_key = uri.to_string();
-        let analysis = server.analysis_map.get(&uri_key)?;
-        let document = server.documents.get(&uri_key)?;
-        let semantic = analysis.semantic()?;
-        let rope = document.rope();
-        let version = document.version();
-        let position = params.text_document_position_params.position;
-        let offset = server.cached_position_to_offset(&uri_key, position, rope, version)?;
+pub async fn hover(server: &CandidLanguageServer, params: HoverParams) -> Result<Option<Hover>> {
+    let uri = params.text_document_position_params.text_document.uri;
+    let uri_key = uri.to_string();
 
-        let info = lookup_identifier(semantic, offset)?;
-        let hover_range = span_to_range(&info.ident_span, rope)?;
-        let contents = hover_contents(rope, semantic, &info)?;
+    let (rope, version) = if let Some(doc) = server.documents.get(&uri_key) {
+        (doc.rope().clone(), doc.version())
+    } else {
+        return Ok(None);
+    };
 
-        Some(Hover {
-            contents,
-            range: Some(hover_range),
-        })
-    })();
+    let token = server.task_token(&uri_key, DocumentTaskKind::Hover);
 
-    Ok(response)
+    let analysis = server.analysis_map.get(&uri_key);
+    let semantic = match analysis.as_ref().and_then(|a| a.semantic()) {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+
+    let position = params.text_document_position_params.position;
+    let offset = match server.cached_position_to_offset(&uri_key, position, &rope, version) {
+        Some(o) => o,
+        None => return Ok(None),
+    };
+
+    if token.yield_and_check().await.is_err() {
+        return Ok(None);
+    }
+
+    let info = match lookup_identifier(semantic, offset) {
+        Some(i) => i,
+        None => return Ok(None),
+    };
+
+    let hover_range = match span_to_range(&info.ident_span, &rope) {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+
+    let contents = match hover_contents(&rope, semantic, &info, Some(&token)).await {
+        Ok(Some(c)) => c,
+        _ => return Ok(None),
+    };
+
+    Ok(Some(Hover {
+        contents,
+        range: Some(hover_range),
+    }))
 }
 
 /// Compose hover markup for the identifier located at `info.ident_span`.
@@ -45,13 +70,14 @@ pub fn hover(server: &CandidLanguageServer, params: HoverParams) -> Result<Optio
 /// 2. [`HoverBuilder`] classifies the identifier into a `HoverSubject`.
 /// 3. The builder converts that subject plus any reference metadata into
 ///    ordered Markdown sections via [`MarkdownWriter`] before returning a LSP hover.
-pub fn hover_contents(
+pub async fn hover_contents(
     rope: &Rope,
     semantic: &Semantic,
     info: &IdentifierInfo,
-) -> Option<HoverContents> {
+    token: Option<&DocumentTaskToken>,
+) -> std::result::Result<Option<HoverContents>, DocumentTaskCancelled> {
     let context = HoverContext::new(rope, semantic, info);
-    HoverBuilder::new(context).render()
+    HoverBuilder::new(context).render(token).await
 }
 
 struct HoverContext<'a> {
@@ -107,17 +133,31 @@ impl<'a> HoverBuilder<'a> {
         }
     }
 
-    fn render(mut self) -> Option<HoverContents> {
+    async fn render(
+        mut self,
+        token: Option<&DocumentTaskToken>,
+    ) -> std::result::Result<Option<HoverContents>, DocumentTaskCancelled> {
         self.collect_subject_sections();
+        if let Some(t) = token {
+            t.yield_and_check().await?;
+        }
+
         self.collect_reference_sections();
+        if let Some(t) = token {
+            t.yield_and_check().await?;
+        }
+
         self.collect_definition_fallback();
 
-        let value = self.writer.finish()?;
+        let value = match self.writer.finish() {
+            Some(v) => v,
+            None => return Ok(None),
+        };
 
-        Some(HoverContents::Markup(MarkupContent {
+        Ok(Some(HoverContents::Markup(MarkupContent {
             kind: MarkupKind::Markdown,
             value,
-        }))
+        })))
     }
 
     fn collect_subject_sections(&mut self) {
@@ -423,8 +463,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn hover_includes_type_doc() {
+    #[tokio::test]
+    async fn hover_includes_type_doc() {
         let mut semantic = base_semantic();
         semantic.symbol_ident_spans.push(None);
         semantic.type_docs.push(Some(TypeDoc {
@@ -445,7 +485,10 @@ mod tests {
             actor: None,
         };
 
-        let hover = hover_contents(&rope, &semantic, &info).expect("hover");
+        let hover = hover_contents(&rope, &semantic, &info, None)
+            .await
+            .expect("task cancelled")
+            .expect("hover");
         let HoverContents::Markup(content) = hover else {
             panic!("expected markup");
         };
@@ -455,8 +498,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn hover_includes_primitive_doc() {
+    #[tokio::test]
+    async fn hover_includes_primitive_doc() {
         let semantic = base_semantic();
         let rope = Rope::from_str("let x : nat = 0;");
         let info = IdentifierInfo {
@@ -472,7 +515,10 @@ mod tests {
             actor: None,
         };
 
-        let hover = hover_contents(&rope, &semantic, &info).expect("hover");
+        let hover = hover_contents(&rope, &semantic, &info, None)
+            .await
+            .expect("task cancelled")
+            .expect("hover");
         let HoverContents::Markup(content) = hover else {
             panic!("expected markup");
         };
@@ -486,8 +532,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn hover_definition_fallback_triggers_when_no_sections() {
+    #[tokio::test]
+    async fn hover_definition_fallback_triggers_when_no_sections() {
         let semantic = base_semantic();
         let rope = Rope::from_str("type Foo = nat");
         let info = IdentifierInfo {
@@ -503,7 +549,10 @@ mod tests {
             actor: None,
         };
 
-        let hover = hover_contents(&rope, &semantic, &info).expect("hover");
+        let hover = hover_contents(&rope, &semantic, &info, None)
+            .await
+            .expect("task cancelled")
+            .expect("hover");
         let HoverContents::Markup(content) = hover else {
             panic!("expected markup");
         };
@@ -514,8 +563,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn hover_includes_import_metadata() {
+    #[tokio::test]
+    async fn hover_includes_import_metadata() {
         let mut semantic = base_semantic();
         semantic.table.imports.push(ImportEntry {
             kind: ImportKind::Service,
@@ -537,7 +586,10 @@ mod tests {
             actor: None,
         };
 
-        let hover = hover_contents(&rope, &semantic, &info).expect("hover");
+        let hover = hover_contents(&rope, &semantic, &info, None)
+            .await
+            .expect("task cancelled")
+            .expect("hover");
         let HoverContents::Markup(content) = hover else {
             panic!("expected markup");
         };

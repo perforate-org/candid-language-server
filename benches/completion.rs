@@ -1,10 +1,10 @@
-use std::sync::Arc;
+use std::{sync::Arc, hint::black_box};
 
 use candid_language_server::lsp::{
     completion::bench_support::{CompletionBenchFixture, CursorContextSnapshot},
     config::ServiceSnippetStyle,
 };
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 
 const SAMPLE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),

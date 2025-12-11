@@ -1,10 +1,11 @@
 use std::{
     fmt,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
 };
+use tokio::task::yield_now;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum DocumentTaskKind {
@@ -13,7 +14,7 @@ pub enum DocumentTaskKind {
     Analysis,
 }
 
-#[derive(Debug ,Default)]
+#[derive(Debug, Default)]
 pub struct DocumentTaskState {
     completion: Arc<TaskGeneration>,
     hover: Arc<TaskGeneration>,
@@ -77,9 +78,7 @@ impl DocumentTaskToken {
 
     pub fn ensure_active(&self) -> Result<(), DocumentTaskCancelled> {
         if self.is_cancelled() {
-            Err(DocumentTaskCancelled {
-                kind: self.kind,
-            })
+            Err(DocumentTaskCancelled { kind: self.kind })
         } else {
             Ok(())
         }
@@ -91,6 +90,11 @@ impl DocumentTaskToken {
 
     pub fn cancel(&self) {
         self.state.cancel();
+    }
+
+    pub async fn yield_and_check(&self) -> Result<(), DocumentTaskCancelled> {
+        yield_now().await;
+        self.ensure_active()
     }
 }
 

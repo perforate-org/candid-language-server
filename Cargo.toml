@@ -26,7 +26,7 @@ tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.8"
 
 [features]
 default = []

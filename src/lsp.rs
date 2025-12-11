@@ -301,7 +301,7 @@ impl LanguageServer for CandidLanguageServer {
             ),
         )
         .await;
-        let result = hover(self, params);
+        let result = hover(self, params).await;
         match &result {
             Ok(Some(_)) => {
                 self.log_info_event("hover_result", format!("uri={} found=true", uri_label))
@@ -471,8 +471,7 @@ impl CandidLanguageServer {
             Arc::clone(entry.value())
         } else {
             let state = Arc::new(DocumentTaskState::default());
-            self.task_states
-                .insert(uri.to_string(), Arc::clone(&state));
+            self.task_states.insert(uri.to_string(), Arc::clone(&state));
             state
         };
         state.token(kind)
@@ -576,9 +575,7 @@ impl CandidLanguageServer {
         }
 
         let ParserResult {
-            ast,
-            parse_errors,
-            ..
+            ast, parse_errors, ..
         } = parse(&text);
         self.log_info_event(
             "parse",

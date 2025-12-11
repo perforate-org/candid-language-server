@@ -16,8 +16,8 @@ fn load_fixture() -> (String, Rope) {
     (text, rope)
 }
 
-#[test]
-fn hover_displays_type_definition() {
+#[tokio::test]
+async fn hover_displays_type_definition() {
     let (text, rope) = load_fixture();
     let ParserResult { ast, .. } = parse(&text);
     let ast = ast.expect("parsed AST");
@@ -26,7 +26,10 @@ fn hover_displays_type_definition() {
     let offset = text.find("Foo").expect("Foo span");
     let info = lookup_identifier(&semantic, offset).expect("lookup Foo");
 
-    let hover = hover_contents(&rope, &semantic, &info).expect("hover result");
+    let hover = hover_contents(&rope, &semantic, &info, None)
+        .await
+        .expect("task cancelled")
+        .expect("hover result");
     let HoverContents::Markup(markup) = hover else {
         panic!("expected markup");
     };
@@ -37,8 +40,8 @@ fn hover_displays_type_definition() {
     );
 }
 
-#[test]
-fn hover_displays_primitive_doc() {
+#[tokio::test]
+async fn hover_displays_primitive_doc() {
     let (text, rope) = load_fixture();
     let ParserResult { ast, .. } = parse(&text);
     let ast = ast.expect("parsed AST");
@@ -47,7 +50,10 @@ fn hover_displays_primitive_doc() {
     let offset = text.find("nat32").expect("nat32 span");
     let info = lookup_identifier(&semantic, offset).expect("lookup nat");
 
-    let hover = hover_contents(&rope, &semantic, &info).expect("hover result");
+    let hover = hover_contents(&rope, &semantic, &info, None)
+        .await
+        .expect("task cancelled")
+        .expect("hover result");
     let HoverContents::Markup(markup) = hover else {
         panic!("expected markup");
     };
@@ -63,8 +69,8 @@ fn hover_displays_primitive_doc() {
     );
 }
 
-#[test]
-fn hover_variant_without_type_does_not_add_null_doc() {
+#[tokio::test]
+async fn hover_variant_without_type_does_not_add_null_doc() {
     let (text, rope) = load_fixture();
     let ParserResult { ast, .. } = parse(&text);
     let ast = ast.expect("parsed AST");
@@ -73,7 +79,10 @@ fn hover_variant_without_type_does_not_add_null_doc() {
     let offset = text.find("Empty").expect("Empty span");
     let info = lookup_identifier(&semantic, offset).expect("lookup Empty");
 
-    let hover = hover_contents(&rope, &semantic, &info).expect("hover result");
+    let hover = hover_contents(&rope, &semantic, &info, None)
+        .await
+        .expect("task cancelled")
+        .expect("hover result");
     let HoverContents::Markup(markup) = hover else {
         panic!("expected markup");
     };
@@ -89,8 +98,8 @@ fn hover_variant_without_type_does_not_add_null_doc() {
     );
 }
 
-#[test]
-fn hover_field_includes_parent_name() {
+#[tokio::test]
+async fn hover_field_includes_parent_name() {
     let (text, rope) = load_fixture();
     let ParserResult { ast, .. } = parse(&text);
     let ast = ast.expect("parsed AST");
@@ -99,7 +108,10 @@ fn hover_field_includes_parent_name() {
     let offset = text.find("value : nat32").expect("field span");
     let info = lookup_identifier(&semantic, offset).expect("lookup field");
 
-    let hover = hover_contents(&rope, &semantic, &info).expect("hover result");
+    let hover = hover_contents(&rope, &semantic, &info, None)
+        .await
+        .expect("task cancelled")
+        .expect("hover result");
     let HoverContents::Markup(markup) = hover else {
         panic!("expected markup");
     };
@@ -115,8 +127,8 @@ fn hover_field_includes_parent_name() {
     );
 }
 
-#[test]
-fn hover_keyword_vec_displays_doc() {
+#[tokio::test]
+async fn hover_keyword_vec_displays_doc() {
     let (text, rope) = load_fixture();
     let ParserResult { ast, .. } = parse(&text);
     let ast = ast.expect("parsed AST");
@@ -125,7 +137,10 @@ fn hover_keyword_vec_displays_doc() {
     let offset = text.find("vec Foo").expect("vec span");
     let info = lookup_identifier(&semantic, offset).expect("lookup vec");
 
-    let hover = hover_contents(&rope, &semantic, &info).expect("hover result");
+    let hover = hover_contents(&rope, &semantic, &info, None)
+        .await
+        .expect("task cancelled")
+        .expect("hover result");
     let HoverContents::Markup(markup) = hover else {
         panic!("expected markup");
     };
@@ -137,8 +152,8 @@ fn hover_keyword_vec_displays_doc() {
     );
 }
 
-#[test]
-fn hover_keyword_type_displays_doc() {
+#[tokio::test]
+async fn hover_keyword_type_displays_doc() {
     let (text, rope) = load_fixture();
     let ParserResult { ast, .. } = parse(&text);
     let ast = ast.expect("parsed AST");
@@ -147,7 +162,10 @@ fn hover_keyword_type_displays_doc() {
     let offset = text.find("type Foo").expect("type keyword span");
     let info = lookup_identifier(&semantic, offset).expect("lookup type");
 
-    let hover = hover_contents(&rope, &semantic, &info).expect("hover result");
+    let hover = hover_contents(&rope, &semantic, &info, None)
+        .await
+        .expect("task cancelled")
+        .expect("hover result");
     let HoverContents::Markup(markup) = hover else {
         panic!("expected markup");
     };
@@ -159,8 +177,8 @@ fn hover_keyword_type_displays_doc() {
     );
 }
 
-#[test]
-fn hover_keyword_service_displays_doc() {
+#[tokio::test]
+async fn hover_keyword_service_displays_doc() {
     let (text, rope) = load_fixture();
     let ParserResult { ast, .. } = parse(&text);
     let ast = ast.expect("parsed AST");
@@ -169,7 +187,10 @@ fn hover_keyword_service_displays_doc() {
     let offset = text.find("service Api").expect("service keyword span");
     let info = lookup_identifier(&semantic, offset).expect("lookup service");
 
-    let hover = hover_contents(&rope, &semantic, &info).expect("hover result");
+    let hover = hover_contents(&rope, &semantic, &info, None)
+        .await
+        .expect("task cancelled")
+        .expect("hover result");
     let HoverContents::Markup(markup) = hover else {
         panic!("expected markup");
     };
@@ -181,8 +202,8 @@ fn hover_keyword_service_displays_doc() {
     );
 }
 
-#[test]
-fn hover_actor_name_displays_docs() {
+#[tokio::test]
+async fn hover_actor_name_displays_docs() {
     let (text, rope) = load_fixture();
     let ParserResult { ast, .. } = parse(&text);
     let ast = ast.expect("parsed AST");
@@ -195,12 +216,15 @@ fn hover_actor_name_displays_docs() {
         .expect("actor name span");
     let info = lookup_identifier(&semantic, offset).expect("lookup actor name");
 
-    let hover = hover_contents(&rope, &semantic, &info).expect("hover result");
+    let hover = hover_contents(&rope, &semantic, &info, None)
+        .await
+        .expect("task cancelled")
+        .expect("hover result");
     let HoverContents::Markup(markup) = hover else {
         panic!("expected markup");
     };
     assert!(
-        markup.value.contains("```candid\nservice Api :"),
+        markup.value.contains("```candid\nservice Api : "),
         "actor snippet missing: {}",
         markup.value
     );
@@ -216,8 +240,8 @@ fn hover_actor_name_displays_docs() {
     );
 }
 
-#[test]
-fn hover_keyword_query_displays_doc() {
+#[tokio::test]
+async fn hover_keyword_query_displays_doc() {
     let (text, rope) = load_fixture();
     let ParserResult { ast, .. } = parse(&text);
     let ast = ast.expect("parsed AST");
@@ -226,7 +250,10 @@ fn hover_keyword_query_displays_doc() {
     let offset = text.find("query").expect("query span");
     let info = lookup_identifier(&semantic, offset).expect("lookup query");
 
-    let hover = hover_contents(&rope, &semantic, &info).expect("hover result");
+    let hover = hover_contents(&rope, &semantic, &info, None)
+        .await
+        .expect("task cancelled")
+        .expect("hover result");
     let HoverContents::Markup(markup) = hover else {
         panic!("expected markup");
     };
@@ -238,8 +265,8 @@ fn hover_keyword_query_displays_doc() {
     );
 }
 
-#[test]
-fn hover_keyword_composite_query_displays_doc() {
+#[tokio::test]
+async fn hover_keyword_composite_query_displays_doc() {
     let (text, rope) = load_fixture();
     let ParserResult { ast, .. } = parse(&text);
     let ast = ast.expect("parsed AST");
@@ -248,7 +275,10 @@ fn hover_keyword_composite_query_displays_doc() {
     let offset = text.find("composite_query").expect("composite_query span");
     let info = lookup_identifier(&semantic, offset).expect("lookup composite_query");
 
-    let hover = hover_contents(&rope, &semantic, &info).expect("hover result");
+    let hover = hover_contents(&rope, &semantic, &info, None)
+        .await
+        .expect("task cancelled")
+        .expect("hover result");
     let HoverContents::Markup(markup) = hover else {
         panic!("expected markup");
     };
@@ -260,8 +290,8 @@ fn hover_keyword_composite_query_displays_doc() {
     );
 }
 
-#[test]
-fn hover_service_method_displays_signature() {
+#[tokio::test]
+async fn hover_service_method_displays_signature() {
     let (text, rope) = load_fixture();
     let ParserResult { ast, .. } = parse(&text);
     let ast = ast.expect("parsed AST");
@@ -270,7 +300,10 @@ fn hover_service_method_displays_signature() {
     let offset = text.find("get_value").expect("service method span");
     let info = lookup_identifier(&semantic, offset).expect("lookup service method");
 
-    let hover = hover_contents(&rope, &semantic, &info).expect("hover result");
+    let hover = hover_contents(&rope, &semantic, &info, None)
+        .await
+        .expect("task cancelled")
+        .expect("hover result");
     let HoverContents::Markup(markup) = hover else {
         panic!("expected markup");
     };
@@ -298,8 +331,8 @@ fn hover_service_method_displays_signature() {
     );
 }
 
-#[test]
-fn hover_service_parameter_displays_binding() {
+#[tokio::test]
+async fn hover_service_parameter_displays_binding() {
     let (text, rope) = load_fixture();
     let ParserResult { ast, .. } = parse(&text);
     let ast = ast.expect("parsed AST");
@@ -308,7 +341,10 @@ fn hover_service_parameter_displays_binding() {
     let offset = text.find("value : Foo").expect("parameter span");
     let info = lookup_identifier(&semantic, offset).expect("lookup parameter");
 
-    let hover = hover_contents(&rope, &semantic, &info).expect("hover result");
+    let hover = hover_contents(&rope, &semantic, &info, None)
+        .await
+        .expect("task cancelled")
+        .expect("hover result");
     let HoverContents::Markup(markup) = hover else {
         panic!("expected markup");
     };
