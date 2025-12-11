@@ -15,6 +15,12 @@ pub fn render_binding(binding: &Binding) -> String {
     buf
 }
 
+pub fn render_inline_type(ty: &IDLTypeWithSpan) -> String {
+    let mut buf = String::new();
+    render_type(ty, 0, &mut buf);
+    buf
+}
+
 fn render_type(ty: &IDLTypeWithSpan, indent: usize, buf: &mut String) {
     render_type_kind(&ty.kind, indent, buf)
 }

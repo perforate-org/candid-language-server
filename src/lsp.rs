@@ -1,9 +1,12 @@
 use crate::{
-    candid_lang::{CandidError, ImCompleteSemanticToken, ParserResult, parse},
+    candid_lang::{CandidError, ParserResult, parse},
     lsp::{
+        completion::CompletionDocumentCache,
+        config::{CompletionEngineMode, ServerConfig, ServiceSnippetStyle},
         navigation::lookup_identifier,
         position::{offset_to_position, position_to_offset, span_to_range},
         semantic_analyze::{Semantic, analyze_program},
+        tasks::{DocumentTaskKind, DocumentTaskState, DocumentTaskToken},
     },
 };
 use candid_parser::{
@@ -13,37 +16,46 @@ use candid_parser::{
 };
 use dashmap::DashMap;
 use lalrpop_util::ParseError;
-use log::debug;
 use rapidhash::fast::RandomState;
 use ropey::Rope;
-use std::{borrow::Cow, error::Error as StdError, fmt::Write, sync::Mutex};
+use serde_json::Value;
+use std::{
+    borrow::Cow,
+    error::Error as StdError,
+    fmt::Write,
+    sync::{Arc, Mutex, RwLock},
+};
 use tower_lsp_server::{
     Client, LanguageServer,
     jsonrpc::Result,
     ls_types::{notification::Notification, *},
 };
 
+pub mod completion;
+pub mod config;
 pub mod hover;
+pub mod markdown;
 pub mod navigation;
 pub mod position;
 pub mod semantic_analyze;
 pub mod semantic_token;
 pub mod span;
 pub mod symbol_table;
+pub mod tasks;
 pub mod type_display;
 pub mod type_docs;
 
+use completion::completion as completion_handler;
 use hover::hover;
 use semantic_token::LEGEND_TYPES;
 
 #[derive(Debug)]
 pub struct CandidLanguageServer {
     pub client: Client,
-    pub ast_map: DashMap<String, IDLProg, RandomState>,
-    pub semantic_map: DashMap<String, Semantic, RandomState>,
-    pub semantic_token_map: DashMap<String, Vec<ImCompleteSemanticToken>, RandomState>,
-    pub document_map: DashMap<String, Rope, RandomState>,
-    pub document_version_map: DashMap<String, i32, RandomState>,
+    pub documents: DashMap<String, DocumentSnapshot, RandomState>,
+    pub analysis_map: DashMap<String, AnalysisSnapshot, RandomState>,
+    pub task_states: DashMap<String, Arc<DocumentTaskState>, RandomState>,
+    config: RwLock<ServerConfig>,
     hover_offset_cache: Mutex<HoverOffsetCache>,
 }
 
@@ -97,8 +109,9 @@ impl LanguageServer for CandidLanguageServer {
 
     async fn initialized(&self, _: InitializedParams) {
         self.client
-            .log_message(MessageType::INFO, "initialized!")
+            .log_message(MessageType::INFO, "initialized")
             .await;
+        let _ = self.refresh_configuration().await;
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -106,15 +119,20 @@ impl LanguageServer for CandidLanguageServer {
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
-        debug!("file opened");
         let text_document = params.text_document;
+        let uri = text_document.uri.clone();
+        let uri_label = uri.to_string();
+        let version = text_document.version;
+        let version_label = Self::version_tag(Some(version));
+        self.log_info_event("did_open", format!("uri={} {}", uri_label, version_label))
+            .await;
         let text = text_document.text;
         let rope = Rope::from_str(&text);
         self.on_change(TextDocumentItem {
             uri: text_document.uri,
             rope,
             text: Cow::Owned(text),
-            version: Some(text_document.version),
+            version: Some(version),
         })
         .await
     }
@@ -128,11 +146,22 @@ impl LanguageServer for CandidLanguageServer {
         let uri = text_document.uri;
         let version = Some(text_document.version);
         let uri_key = uri.to_string();
-        let mut rope = self
-            .document_map
-            .get(&uri_key)
-            .map(|doc| doc.value().clone())
-            .unwrap_or_default();
+        let version_label = Self::version_tag(version);
+        self.log_info_event(
+            "did_change",
+            format!(
+                "uri={} {} changes={}",
+                uri_key,
+                version_label,
+                content_changes.len()
+            ),
+        )
+        .await;
+        let (mut rope, current_version) = if let Some(doc) = self.documents.get(&uri_key) {
+            (doc.rope().clone(), doc.version())
+        } else {
+            (Rope::default(), None)
+        };
 
         for change in content_changes {
             let TextDocumentContentChangeEvent { range, text, .. } = change;
@@ -143,10 +172,10 @@ impl LanguageServer for CandidLanguageServer {
                 }
                 Some(range) => {
                     let mut start_offset = self
-                        .cached_position_to_offset(&uri_key, range.start, &rope)
+                        .cached_position_to_offset(&uri_key, range.start, &rope, current_version)
                         .unwrap_or_else(|| rope.len_chars());
                     let mut end_offset = self
-                        .cached_position_to_offset(&uri_key, range.end, &rope)
+                        .cached_position_to_offset(&uri_key, range.end, &rope, current_version)
                         .unwrap_or(start_offset);
 
                     let doc_len = rope.len_chars();
@@ -175,7 +204,14 @@ impl LanguageServer for CandidLanguageServer {
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
-        dbg!(&params.text);
+        let uri = params.text_document.uri.clone();
+        let uri_label = uri.to_string();
+        let text_provided = params.text.is_some();
+        self.log_info_event(
+            "did_save",
+            format!("uri={} text_included={text_provided}", uri_label),
+        )
+        .await;
         if let Some(text) = params.text {
             let item = TextDocumentItem {
                 uri: params.text_document.uri,
@@ -186,37 +222,141 @@ impl LanguageServer for CandidLanguageServer {
             self.on_change(item).await;
             _ = self.client.semantic_tokens_refresh().await;
         }
-        debug!("file saved!");
     }
 
-    async fn did_close(&self, _: DidCloseTextDocumentParams) {
-        debug!("file closed!");
+    async fn did_close(&self, params: DidCloseTextDocumentParams) {
+        let uri = params.text_document.uri;
+        let uri_label = uri.to_string();
+        self.log_info_event("did_close", format!("uri={}", uri_label))
+            .await;
+        self.task_states.remove(&uri_label);
+    }
+
+    async fn did_change_configuration(&self, params: DidChangeConfigurationParams) {
+        self.log_info_event("did_change_configuration", "".to_string())
+            .await;
+        if !self.refresh_configuration().await {
+            self.apply_settings_value(params.settings);
+        }
     }
 
     async fn goto_definition(
         &self,
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
+        let request_uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .clone();
+        let position = params.text_document_position_params.position;
+        let request_uri_label = request_uri.to_string();
+        self.log_info_event(
+            "goto_definition",
+            format!(
+                "uri={} line={} character={}",
+                request_uri_label, position.line, position.character
+            ),
+        )
+        .await;
         let response = (|| {
             let uri = params.text_document_position_params.text_document.uri;
             let uri_key = uri.to_string();
-            let semantic = self.semantic_map.get(&uri_key)?;
-            let rope = self.document_map.get(&uri_key)?;
+            let analysis = self.analysis_map.get(&uri_key)?;
+            let document = self.documents.get(&uri_key)?;
+            let semantic = analysis.semantic()?;
+            let rope = document.rope();
+            let version = document.version();
             let position = params.text_document_position_params.position;
-            let offset = self.cached_position_to_offset(&uri_key, position, &rope)?;
+            let offset = self.cached_position_to_offset(&uri_key, position, rope, version)?;
 
-            let info = lookup_identifier(&semantic, offset)?;
+            let info = lookup_identifier(semantic, offset)?;
             let definition_span = info.definition_span?;
-            let range = span_to_range(&definition_span, &rope)?;
+            let range = span_to_range(&definition_span, rope)?;
 
             Some(GotoDefinitionResponse::Scalar(Location::new(uri, range)))
         })();
+        self.log_info_event(
+            "goto_definition_result",
+            format!("uri={} found={}", request_uri_label, response.is_some()),
+        )
+        .await;
 
         Ok(response)
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
-        hover(self, params)
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .clone();
+        let position = params.text_document_position_params.position;
+        let uri_label = uri.to_string();
+        self.log_info_event(
+            "hover",
+            format!(
+                "uri={} line={} character={}",
+                uri_label, position.line, position.character
+            ),
+        )
+        .await;
+        let result = hover(self, params);
+        match &result {
+            Ok(Some(_)) => {
+                self.log_info_event("hover_result", format!("uri={} found=true", uri_label))
+                    .await;
+            }
+            Ok(None) => {
+                self.log_info_event("hover_result", format!("uri={} found=false", uri_label))
+                    .await;
+            }
+            Err(err) => {
+                self.log_warn_event("hover_error", format!("uri={} error={err}", uri_label))
+                    .await;
+            }
+        }
+        result
+    }
+
+    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
+        let uri = params.text_document_position.text_document.uri.clone();
+        let position = params.text_document_position.position;
+        let uri_label = uri.to_string();
+        self.log_info_event(
+            "completion",
+            format!(
+                "uri={} line={} character={}",
+                uri_label, position.line, position.character
+            ),
+        )
+        .await;
+        let result = completion_handler(self, params).await;
+        match &result {
+            Ok(Some(CompletionResponse::Array(items))) => {
+                self.log_info_event(
+                    "completion_result",
+                    format!("uri={} items={}", uri_label, items.len()),
+                )
+                .await;
+            }
+            Ok(Some(_)) => {
+                self.log_info_event(
+                    "completion_result",
+                    format!("uri={} items=unknown", uri_label),
+                )
+                .await;
+            }
+            Ok(None) => {
+                self.log_info_event("completion_result", format!("uri={} items=0", uri_label))
+                    .await;
+            }
+            Err(err) => {
+                self.log_warn_event("completion_error", format!("uri={} error={err}", uri_label))
+                    .await;
+            }
+        }
+        result
     }
 }
 
@@ -234,6 +374,67 @@ struct TextDocumentItem<'a> {
     version: Option<i32>,
 }
 
+#[derive(Debug)]
+pub struct DocumentSnapshot {
+    rope: Rope,
+    version: Option<i32>,
+}
+
+impl DocumentSnapshot {
+    fn new(rope: Rope, version: Option<i32>) -> Self {
+        Self { rope, version }
+    }
+
+    fn rope(&self) -> &Rope {
+        &self.rope
+    }
+
+    fn version(&self) -> Option<i32> {
+        self.version
+    }
+}
+
+#[derive(Debug)]
+pub struct AnalysisSnapshot {
+    ast: Option<IDLProg>,
+    semantic: Option<Semantic>,
+    completion_cache: Option<CompletionDocumentCache>,
+    version: Option<i32>,
+}
+
+impl AnalysisSnapshot {
+    fn new(
+        ast: Option<IDLProg>,
+        semantic: Option<Semantic>,
+        completion_cache: Option<CompletionDocumentCache>,
+        version: Option<i32>,
+    ) -> Self {
+        Self {
+            ast,
+            semantic,
+            completion_cache,
+            version,
+        }
+    }
+
+    fn ast(&self) -> Option<&IDLProg> {
+        self.ast.as_ref()
+    }
+
+    fn semantic(&self) -> Option<&Semantic> {
+        self.semantic.as_ref()
+    }
+
+    fn completion_cache(&self) -> Option<&CompletionDocumentCache> {
+        self.completion_cache.as_ref()
+    }
+
+    #[allow(dead_code)]
+    fn version(&self) -> Option<i32> {
+        self.version
+    }
+}
+
 impl CandidLanguageServer {
     /// Create a new instance of the CandidLanguageServer.
     pub fn new(client: Client) -> Self {
@@ -241,13 +442,114 @@ impl CandidLanguageServer {
 
         Self {
             client,
-            ast_map: DashMap::with_hasher(hasher),
-            semantic_map: DashMap::with_hasher(hasher),
-            semantic_token_map: DashMap::with_hasher(hasher),
-            document_map: DashMap::with_hasher(hasher),
-            document_version_map: DashMap::with_hasher(hasher),
+            documents: DashMap::with_hasher(hasher),
+            analysis_map: DashMap::with_hasher(hasher),
+            task_states: DashMap::with_hasher(hasher),
+            config: RwLock::new(ServerConfig::default()),
             hover_offset_cache: Mutex::new(HoverOffsetCache::new(64)),
         }
+    }
+
+    pub fn service_snippet_style(&self) -> ServiceSnippetStyle {
+        let guard = self
+            .config
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner());
+        guard.service_snippet_style()
+    }
+
+    pub fn completion_mode(&self, rope: &Rope) -> CompletionEngineMode {
+        let guard = self
+            .config
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner());
+        guard.completion_mode_for(rope)
+    }
+
+    pub fn task_token(&self, uri: &str, kind: DocumentTaskKind) -> DocumentTaskToken {
+        let state = if let Some(entry) = self.task_states.get(uri) {
+            Arc::clone(entry.value())
+        } else {
+            let state = Arc::new(DocumentTaskState::default());
+            self.task_states
+                .insert(uri.to_string(), Arc::clone(&state));
+            state
+        };
+        state.token(kind)
+    }
+
+    async fn refresh_configuration(&self) -> bool {
+        let items = vec![ConfigurationItem {
+            scope_uri: None,
+            section: Some("candidLanguageServer".to_string()),
+        }];
+        match self.client.configuration(items).await {
+            Ok(values) => {
+                if let Some(value) = values.into_iter().next() {
+                    self.apply_settings_value(value);
+                    self.log_info_event("configuration", "applied workspace settings".to_string())
+                        .await;
+                    true
+                } else {
+                    self.log_info_event(
+                        "configuration",
+                        "no workspace settings returned".to_string(),
+                    )
+                    .await;
+                    false
+                }
+            }
+            Err(err) => {
+                self.log_warn_event(
+                    "configuration_error",
+                    format!("failed to fetch workspace settings: {err}"),
+                )
+                .await;
+                false
+            }
+        }
+    }
+
+    fn apply_settings_value(&self, value: Value) {
+        if value.is_null() {
+            return;
+        }
+        let mut guard = self
+            .config
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner());
+        guard.apply_settings(value);
+    }
+
+    fn version_tag(version: Option<i32>) -> String {
+        match version {
+            Some(value) => format!("(version: {value})"),
+            None => "(version: none)".to_string(),
+        }
+    }
+
+    fn event_message(event: &str, details: &str) -> String {
+        if details.is_empty() {
+            format!("[{event}]")
+        } else {
+            format!("[{event}] {details}")
+        }
+    }
+
+    async fn log_info_event(&self, event: &str, details: impl Into<String>) {
+        let details = details.into();
+        let message = Self::event_message(event, &details);
+        #[cfg(feature = "tracing")]
+        tracing::info!("{message}");
+        let _ = self.client.log_message(MessageType::INFO, message).await;
+    }
+
+    async fn log_warn_event(&self, event: &str, details: impl Into<String>) {
+        let details = details.into();
+        let message = Self::event_message(event, &details);
+        #[cfg(feature = "tracing")]
+        tracing::warn!("{message}");
+        let _ = self.client.log_message(MessageType::WARNING, message).await;
     }
 
     async fn on_change(&self, params: TextDocumentItem<'_>) {
@@ -258,13 +560,17 @@ impl CandidLanguageServer {
             version,
         } = params;
         let uri_key = uri.to_string();
+        let version_label = Self::version_tag(version);
+        self.log_info_event(
+            "document_change",
+            format!("uri={} {}", uri_key, version_label),
+        )
+        .await;
 
-        self.document_map.insert(uri_key.clone(), rope.clone());
-        if let Some(version) = version {
-            self.document_version_map.insert(uri_key.clone(), version);
-        } else {
-            self.document_version_map.remove(&uri_key);
-        }
+        self.documents.insert(
+            uri_key.clone(),
+            DocumentSnapshot::new(rope.clone(), version),
+        );
         if let Ok(mut cache) = self.hover_offset_cache.lock() {
             cache.invalidate_uri(&uri_key);
         }
@@ -272,8 +578,13 @@ impl CandidLanguageServer {
         let ParserResult {
             ast,
             parse_errors,
-            semantic_tokens,
+            ..
         } = parse(&text);
+        self.log_info_event(
+            "parse",
+            format!("uri={} parse_errors={}", uri_key, parse_errors.len()),
+        )
+        .await;
 
         let mut diagnostics = Vec::with_capacity(parse_errors.len());
         for item in parse_errors {
@@ -321,13 +632,23 @@ impl CandidLanguageServer {
             }
         }
 
-        if let Some(ast) = ast {
+        let analysis_snapshot = if let Some(ast) = ast {
             match analyze_program(&ast, &rope) {
                 Ok(semantic) => {
-                    self.semantic_map.insert(uri_key.clone(), semantic);
+                    let completion_cache =
+                        CompletionDocumentCache::build(Some(&ast), Some(&semantic), version);
+                    self.log_info_event("semantic", format!("uri={} status=ok", uri_key))
+                        .await;
+                    Some(AnalysisSnapshot::new(
+                        Some(ast),
+                        Some(semantic),
+                        completion_cache,
+                        version,
+                    ))
                 }
                 Err(err) => {
-                    self.semantic_map.remove(&uri_key);
+                    let completion_cache =
+                        CompletionDocumentCache::build(Some(&ast), None, version);
                     let span = err.span();
                     let start_position = offset_to_position(span.start, &rope);
                     let end_position = offset_to_position(span.end, &rope);
@@ -348,18 +669,36 @@ impl CandidLanguageServer {
                         };
                         diagnostics.push(diag);
                     }
+                    self.log_warn_event(
+                        "semantic",
+                        format!("uri={} status=error error={err}", uri_key),
+                    )
+                    .await;
+                    Some(AnalysisSnapshot::new(
+                        Some(ast),
+                        None,
+                        completion_cache,
+                        version,
+                    ))
                 }
             }
-            self.ast_map.insert(uri_key.clone(), ast);
         } else {
-            self.ast_map.remove(&uri_key);
-            self.semantic_map.remove(&uri_key);
+            self.log_info_event("semantic", format!("uri={} status=no-ast", uri_key))
+                .await;
+            None
+        };
+
+        if let Some(snapshot) = analysis_snapshot {
+            self.analysis_map.insert(uri_key.clone(), snapshot);
+        } else {
+            self.analysis_map.remove(&uri_key);
         }
 
         self.client
             .publish_diagnostics(uri.clone(), diagnostics, version)
             .await;
-        self.semantic_token_map.insert(uri_key, semantic_tokens);
+        self.log_info_event("diagnostics", format!("uri={}", uri_key))
+            .await;
     }
 
     fn cached_position_to_offset(
@@ -367,12 +706,8 @@ impl CandidLanguageServer {
         uri: &str,
         position: Position,
         rope: &Rope,
+        version: Option<i32>,
     ) -> Option<usize> {
-        let version = self
-            .document_version_map
-            .get(uri)
-            .map(|entry| *entry.value());
-
         {
             if let Ok(mut cache) = self.hover_offset_cache.lock()
                 && let Some(offset) = cache.lookup(uri, version, &position)

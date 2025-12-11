@@ -20,6 +20,7 @@ pub enum KeywordDoc {
     Oneway,
     Query,
     CompositeQuery,
+    Import,
 }
 
 macro_rules! prim_doc {
@@ -44,7 +45,7 @@ macro_rules! keyword_doc_file {
     };
 }
 
-fn primitive_name(kind: &PrimType) -> &'static str {
+pub fn primitive_name(kind: &PrimType) -> &'static str {
     match kind {
         PrimType::Nat => "nat",
         PrimType::Nat8 => "nat8",
@@ -102,6 +103,7 @@ impl KeywordDoc {
             KeywordDoc::Oneway => "oneway",
             KeywordDoc::Query => "query",
             KeywordDoc::CompositeQuery => "composite_query",
+            KeywordDoc::Import => "import",
         }
     }
 }
@@ -119,10 +121,11 @@ fn keyword_body(kind: KeywordDoc) -> &'static str {
         KeywordDoc::Oneway => keyword_doc_file!("oneway"),
         KeywordDoc::Query => keyword_doc_file!("query"),
         KeywordDoc::CompositeQuery => keyword_doc_file!("composite_query"),
+        KeywordDoc::Import => keyword_doc_file!("import"),
     }
 }
 
-const PRIMITIVE_KINDS: [PrimType; 17] = [
+pub const PRIMITIVE_KINDS: [PrimType; 17] = [
     PrimType::Nat,
     PrimType::Nat8,
     PrimType::Nat16,
@@ -142,7 +145,7 @@ const PRIMITIVE_KINDS: [PrimType; 17] = [
     PrimType::Empty,
 ];
 
-const KEYWORD_KINDS: [KeywordDoc; 11] = [
+pub const KEYWORD_KINDS: [KeywordDoc; 12] = [
     KeywordDoc::Func,
     KeywordDoc::Opt,
     KeywordDoc::Principal,
@@ -154,10 +157,11 @@ const KEYWORD_KINDS: [KeywordDoc; 11] = [
     KeywordDoc::Oneway,
     KeywordDoc::Query,
     KeywordDoc::CompositeQuery,
+    KeywordDoc::Import,
 ];
 
 static PRIMITIVE_DOCS: OnceLock<[String; 17]> = OnceLock::new();
-static KEYWORD_DOCS: OnceLock<[String; 11]> = OnceLock::new();
+static KEYWORD_DOCS: OnceLock<[String; 12]> = OnceLock::new();
 static BLOB_DOC: OnceLock<String> = OnceLock::new();
 
 pub fn primitive_doc(kind: &PrimType) -> &'static str {
@@ -210,7 +214,7 @@ fn primitive_index(kind: &PrimType) -> usize {
     }
 }
 
-fn build_keyword_docs() -> [String; 11] {
+fn build_keyword_docs() -> [String; 12] {
     std::array::from_fn(|idx| {
         let kind = KEYWORD_KINDS[idx];
         let header = kind.keyword();
@@ -232,5 +236,14 @@ fn keyword_index(kind: KeywordDoc) -> usize {
         KeywordDoc::Oneway => 8,
         KeywordDoc::Query => 9,
         KeywordDoc::CompositeQuery => 10,
+        KeywordDoc::Import => 11,
     }
+}
+
+pub fn primitive_kinds() -> &'static [PrimType; 17] {
+    &PRIMITIVE_KINDS
+}
+
+pub fn keyword_kinds() -> &'static [KeywordDoc; 12] {
+    &KEYWORD_KINDS
 }

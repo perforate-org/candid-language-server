@@ -1,5 +1,6 @@
 use crate::lsp::{
     CandidLanguageServer, lookup_identifier,
+    markdown::{self, MarkdownWriter},
     navigation::IdentifierInfo,
     semantic_analyze::{PrimitiveHover, Semantic},
     span::Span,
@@ -16,14 +17,17 @@ pub fn hover(server: &CandidLanguageServer, params: HoverParams) -> Result<Optio
     let response = (|| {
         let uri = params.text_document_position_params.text_document.uri;
         let uri_key = uri.to_string();
-        let semantic = server.semantic_map.get(&uri_key)?;
-        let rope = server.document_map.get(&uri_key)?;
+        let analysis = server.analysis_map.get(&uri_key)?;
+        let document = server.documents.get(&uri_key)?;
+        let semantic = analysis.semantic()?;
+        let rope = document.rope();
+        let version = document.version();
         let position = params.text_document_position_params.position;
-        let offset = server.cached_position_to_offset(&uri_key, position, &rope)?;
+        let offset = server.cached_position_to_offset(&uri_key, position, rope, version)?;
 
-        let info = lookup_identifier(&semantic, offset)?;
-        let hover_range = span_to_range(&info.ident_span, &rope)?;
-        let contents = hover_contents(&rope, &semantic, &info)?;
+        let info = lookup_identifier(semantic, offset)?;
+        let hover_range = span_to_range(&info.ident_span, rope)?;
+        let contents = hover_contents(rope, semantic, &info)?;
 
         Some(Hover {
             contents,
@@ -40,7 +44,7 @@ pub fn hover(server: &CandidLanguageServer, params: HoverParams) -> Result<Optio
 /// 1. [`HoverContext`] snapshots the current Rope/Semantic state.
 /// 2. [`HoverBuilder`] classifies the identifier into a `HoverSubject`.
 /// 3. The builder converts that subject plus any reference metadata into
-///    ordered Markdown sections via [`HoverWriter`] before returning a LSP hover.
+///    ordered Markdown sections via [`MarkdownWriter`] before returning a LSP hover.
 pub fn hover_contents(
     rope: &Rope,
     semantic: &Semantic,
@@ -90,7 +94,7 @@ impl<'a> HoverContext<'a> {
 /// Incrementally assembles Markdown sections for a hover response.
 struct HoverBuilder<'a> {
     context: HoverContext<'a>,
-    writer: HoverWriter,
+    writer: MarkdownWriter,
     snippet_cache: SnippetCache,
 }
 
@@ -98,7 +102,7 @@ impl<'a> HoverBuilder<'a> {
     fn new(context: HoverContext<'a>) -> Self {
         Self {
             context,
-            writer: HoverWriter::new(),
+            writer: MarkdownWriter::default(),
             snippet_cache: SnippetCache::new(),
         }
     }
@@ -108,7 +112,7 @@ impl<'a> HoverBuilder<'a> {
         self.collect_reference_sections();
         self.collect_definition_fallback();
 
-        let value = self.writer.into_value()?;
+        let value = self.writer.finish()?;
 
         Some(HoverContents::Markup(MarkupContent {
             kind: MarkupKind::Markdown,
@@ -134,10 +138,10 @@ impl<'a> HoverBuilder<'a> {
                 if let Some(parent) = parent {
                     self.writer.push_code_block(&parent);
                 }
-                push_snippet_with_docs(&mut self.writer, &snippet, docs);
+                markdown::push_snippet_with_docs(&mut self.writer, &snippet, docs.as_deref());
             }
             HoverSubject::Actor { snippet, docs } => {
-                push_snippet_with_docs(&mut self.writer, &snippet, docs);
+                markdown::push_snippet_with_docs(&mut self.writer, &snippet, docs.as_deref());
             }
             HoverSubject::Field {
                 parent,
@@ -147,10 +151,10 @@ impl<'a> HoverBuilder<'a> {
                 if let Some(parent) = parent {
                     self.writer.push_code_block(&parent);
                 }
-                push_snippet_with_docs(&mut self.writer, &snippet, docs);
+                markdown::push_snippet_with_docs(&mut self.writer, &snippet, docs.as_deref());
             }
             HoverSubject::TypeDoc { definition, docs } => {
-                push_snippet_with_docs(&mut self.writer, &definition, docs);
+                markdown::push_snippet_with_docs(&mut self.writer, &definition, docs.as_deref());
             }
             HoverSubject::Ident { snippet } => {
                 self.writer.push_code_block(&snippet);
@@ -365,57 +369,6 @@ impl SnippetCache {
     }
 }
 
-struct HoverWriter {
-    buffer: String,
-    sections: usize,
-}
-
-impl HoverWriter {
-    fn new() -> Self {
-        Self {
-            buffer: String::new(),
-            sections: 0,
-        }
-    }
-
-    #[inline]
-    fn is_empty(&self) -> bool {
-        self.sections == 0
-    }
-
-    fn push_text(&mut self, text: impl AsRef<str>) {
-        self.start_section();
-        self.buffer.push_str(text.as_ref());
-    }
-
-    fn push_code_block(&mut self, code: &str) {
-        self.start_section();
-        self.buffer.push_str("```candid\n");
-        self.buffer.push_str(code);
-        self.buffer.push_str("\n```");
-    }
-
-    fn push_rule(&mut self) {
-        self.start_section();
-        self.buffer.push_str("---");
-    }
-
-    fn start_section(&mut self) {
-        if self.sections > 0 {
-            self.buffer.push_str("\n\n");
-        }
-        self.sections += 1;
-    }
-
-    fn into_value(self) -> Option<String> {
-        if self.sections == 0 {
-            None
-        } else {
-            Some(self.buffer)
-        }
-    }
-}
-
 pub fn snippet_from_span(rope: &Rope, span: &Span) -> Option<String> {
     if span.start >= span.end {
         return None;
@@ -436,18 +389,6 @@ pub fn snippet_from_span(rope: &Rope, span: &Span) -> Option<String> {
     };
 
     Some(snippet)
-}
-
-fn push_snippet_with_docs(writer: &mut HoverWriter, snippet: &str, docs: Option<Arc<str>>) {
-    writer.push_code_block(snippet);
-    push_docs_section(writer, docs);
-}
-
-fn push_docs_section(writer: &mut HoverWriter, docs: Option<Arc<str>>) {
-    if let Some(doc) = docs {
-        writer.push_rule();
-        writer.push_text(doc.as_ref());
-    }
 }
 
 #[cfg(test)]
@@ -472,7 +413,9 @@ mod tests {
             fields: IndexVec::<_, FieldMetadata>::new(),
             service_methods: IndexVec::<_, MethodMetadata>::new(),
             params: IndexVec::<_, ParamMetadata>::new(),
+            locals: Vec::new(),
             symbol_ident_spans: IndexVec::new(),
+            symbol_ident_names: IndexVec::new(),
             type_docs: IndexVec::new(),
             primitive_spans: Vec::new(),
             keyword_spans: Vec::new(),

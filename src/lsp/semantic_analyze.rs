@@ -1,7 +1,7 @@
 use crate::lsp::{
     span::Span,
     symbol_table::{ImportKind, ReferenceId, SymbolId, SymbolTable},
-    type_display::{render_actor_declaration, render_binding},
+    type_display::{render_actor_declaration, render_binding, render_inline_type},
     type_docs::{KeywordDoc, TypeDoc},
 };
 use candid_parser::candid::types::internal::FuncMode;
@@ -67,6 +67,7 @@ pub struct FieldMetadata {
     pub type_span: Option<Span>,
     pub docs: Option<Arc<str>>,
     pub parent_name: Option<Arc<str>>,
+    pub label: Option<Arc<str>>,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +77,7 @@ pub struct MethodMetadata {
     pub type_span: Option<Span>,
     pub docs: Option<Arc<str>>,
     pub parent_name: Option<Arc<str>>,
+    pub signature: Option<MethodSignature>,
 }
 
 #[derive(Debug, Clone)]
@@ -84,6 +86,14 @@ pub struct ParamMetadata {
     pub name_span: Option<Span>,
     pub type_span: Span,
     pub role: ParamRole,
+}
+
+#[derive(Debug, Clone)]
+pub struct LocalBinding {
+    pub name: Arc<str>,
+    pub span: Span,
+    pub scope: Span,
+    pub is_definition: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -128,14 +138,14 @@ pub struct Semantic {
     pub fields: IndexVec<FieldId, FieldMetadata>,
     pub service_methods: IndexVec<MethodId, MethodMetadata>,
     pub params: IndexVec<ParamId, ParamMetadata>,
+    pub locals: Vec<LocalBinding>,
     pub symbol_ident_spans: IndexVec<SymbolId, Option<Span>>,
+    pub symbol_ident_names: IndexVec<SymbolId, Option<Arc<str>>>,
     pub type_docs: IndexVec<SymbolId, Option<TypeDoc>>,
     pub primitive_spans: Vec<(Span, PrimitiveHover)>,
     pub keyword_spans: Vec<(Span, KeywordDoc)>,
     pub actor: Option<ActorMetadata>,
 }
-
-impl Semantic {}
 
 #[derive(Debug)]
 pub struct Ctx<'a> {
@@ -144,13 +154,16 @@ pub struct Ctx<'a> {
     fields: IndexVec<FieldId, FieldMetadata>,
     service_methods: IndexVec<MethodId, MethodMetadata>,
     params: IndexVec<ParamId, ParamMetadata>,
+    locals: Vec<LocalBinding>,
     rope: &'a Rope,
     symbol_ident_spans: IndexVec<SymbolId, Option<Span>>,
+    symbol_ident_names: IndexVec<SymbolId, Option<Arc<str>>>,
     type_docs: IndexVec<SymbolId, Option<TypeDoc>>,
     primitive_spans: Vec<(Span, PrimitiveHover)>,
     keyword_spans: Vec<(Span, KeywordDoc)>,
     actor: Option<ActorMetadata>,
     type_name_stack: Vec<Option<Arc<str>>>,
+    scope_stack: Vec<Span>,
 }
 
 impl<'a> Ctx<'a> {
@@ -177,16 +190,32 @@ impl<'a> Ctx<'a> {
             .find_map(|name| name.clone())
     }
 
+    fn push_scope(&mut self, span: Span) {
+        self.scope_stack.push(span);
+    }
+
+    fn pop_scope(&mut self) {
+        self.scope_stack.pop();
+    }
+
+    fn current_scope(&self) -> Option<Span> {
+        self.scope_stack.last().cloned()
+    }
+
     fn declare_symbol<S: Into<String>>(&mut self, name: S, span: Span) -> SymbolId {
         let name = name.into();
         let symbol_id = self.table.add_symbol(span.clone());
         self.register_symbol_slot();
+        if let Some(slot) = self.symbol_ident_names.get_mut(symbol_id) {
+            *slot = Some(Arc::<str>::from(name.as_str()));
+        }
         self.env.push_back((name, span));
         symbol_id
     }
 
     fn register_symbol_slot(&mut self) {
         self.symbol_ident_spans.push(None);
+        self.symbol_ident_names.push(None);
         self.type_docs.push(None);
     }
 
@@ -198,14 +227,35 @@ impl<'a> Ctx<'a> {
             None
         };
 
+        let label_text = label_span
+            .as_ref()
+            .map(|span| {
+                Arc::<str>::from(self.rope.slice(span.clone()).to_string().into_boxed_str())
+            })
+            .or_else(|| {
+                field_label_name(field).map(|name| Arc::<str>::from(name.into_boxed_str()))
+            });
+
         let metadata = FieldMetadata {
             span: field.span.clone(),
             label_span: label_span.clone(),
             type_span,
             docs: format_docs(&field.docs),
             parent_name: self.current_type_name(),
+            label: label_text,
         };
         self.fields.push(metadata);
+
+        if let (Some(scope), Some(label_span), Some(label_name)) =
+            (self.current_scope(), label_span, field_label_name(field))
+        {
+            self.locals.push(LocalBinding {
+                name: Arc::<str>::from(label_name.into_boxed_str()),
+                span: label_span,
+                scope,
+                is_definition: false,
+            });
+        }
     }
 
     fn register_service_method(&mut self, binding: &Binding, parent_name: Option<Arc<str>>) {
@@ -215,6 +265,10 @@ impl<'a> Ctx<'a> {
         } else {
             None
         };
+        let signature = match &binding.typ.kind {
+            IDLType::FuncT(func) => Some(MethodSignature::from_func(func)),
+            _ => None,
+        };
 
         let metadata = MethodMetadata {
             span: binding.span.clone(),
@@ -222,6 +276,7 @@ impl<'a> Ctx<'a> {
             type_span,
             docs: format_docs(&binding.docs),
             parent_name,
+            signature,
         };
         self.service_methods.push(metadata);
     }
@@ -240,11 +295,20 @@ impl<'a> Ctx<'a> {
                 .unwrap_or(arg.span.start);
             let span = span_start..arg.span.end;
             let metadata = ParamMetadata {
-                span,
-                name_span,
+                span: span.clone(),
+                name_span: name_span.clone(),
                 type_span: arg.span.clone(),
                 role: ParamRole::Argument,
             };
+            if let Some(name_span) = &name_span {
+                let name = self.rope.slice(name_span.clone()).to_string();
+                self.locals.push(LocalBinding {
+                    name: Arc::<str>::from(name.into_boxed_str()),
+                    span: name_span.clone(),
+                    scope: func_span.clone(),
+                    is_definition: true,
+                });
+            }
             self.params.push(metadata);
             cursor = arg.span.end;
         }
@@ -303,13 +367,16 @@ pub fn analyze_program(ast: &IDLProg, rope: &Rope) -> Result<Semantic> {
         fields,
         service_methods,
         params,
+        locals: Vec::new(),
         rope,
         symbol_ident_spans: IndexVec::new(),
+        symbol_ident_names: IndexVec::new(),
         type_docs: IndexVec::new(),
         primitive_spans: Vec::new(),
         keyword_spans: Vec::new(),
         actor: None,
         type_name_stack: Vec::new(),
+        scope_stack: Vec::new(),
     };
     for dec in ast.decs.iter() {
         match dec {
@@ -443,7 +510,9 @@ pub fn analyze_program(ast: &IDLProg, rope: &Rope) -> Result<Semantic> {
         fields: ctx.fields,
         service_methods: ctx.service_methods,
         params: ctx.params,
+        locals: ctx.locals,
         symbol_ident_spans: ctx.symbol_ident_spans,
+        symbol_ident_names: ctx.symbol_ident_names,
         type_docs: ctx.type_docs,
         primitive_spans: ctx.primitive_spans,
         keyword_spans: ctx.keyword_spans,
@@ -528,11 +597,15 @@ fn analyze_type(idl_type: &IDLTypeWithSpan, ctx: &mut Ctx) -> Result<()> {
         }
         IDLType::RecordT(type_fields) => {
             ctx.register_keyword(idl_type.span.clone(), KeywordDoc::Record);
+            ctx.push_scope(idl_type.span.clone());
             analyze_type_fields(type_fields, ctx)?;
+            ctx.pop_scope();
         }
         IDLType::VariantT(type_fields) => {
             ctx.register_keyword(idl_type.span.clone(), KeywordDoc::Variant);
+            ctx.push_scope(idl_type.span.clone());
             analyze_type_fields(type_fields, ctx)?;
+            ctx.pop_scope();
         }
         IDLType::ServT(bindings) => {
             ctx.register_keyword(idl_type.span.clone(), KeywordDoc::Service);
@@ -597,7 +670,7 @@ fn compute_actor_name_span(actor: &IDLActorType, rope: &Rope) -> Option<Span> {
     find_identifier_span(rope, search_span, name, false)
 }
 
-fn compute_binding_ident_span(binding: &Binding, rope: &Rope) -> Option<Span> {
+pub(crate) fn compute_binding_ident_span(binding: &Binding, rope: &Rope) -> Option<Span> {
     if binding.id.is_empty() {
         return None;
     }
@@ -614,7 +687,7 @@ fn compute_binding_ident_span(binding: &Binding, rope: &Rope) -> Option<Span> {
     find_identifier_span(rope, start..end, &binding.id, true)
 }
 
-fn compute_field_label_span(field: &TypeField, rope: &Rope) -> Option<Span> {
+pub(crate) fn compute_field_label_span(field: &TypeField, rope: &Rope) -> Option<Span> {
     let label_text = match &field.label {
         Label::Named(name) => name.clone(),
         Label::Id(id) | Label::Unnamed(id) => id.to_string(),
@@ -634,6 +707,13 @@ fn compute_field_label_span(field: &TypeField, rope: &Rope) -> Option<Span> {
     }
 
     find_identifier_span(rope, start..end, &label_text, true)
+}
+
+fn field_label_name(field: &TypeField) -> Option<String> {
+    match &field.label {
+        Label::Named(name) => Some(name.clone()),
+        Label::Id(id) | Label::Unnamed(id) => Some(id.to_string()),
+    }
 }
 
 fn args_region_start(rope: &Rope, span: &Span) -> usize {
@@ -778,4 +858,32 @@ fn annotate_code_fences(text: &str) -> String {
         i += ch.len_utf8();
     }
     result
+}
+
+fn flatten_type_text(ty: &IDLTypeWithSpan) -> Arc<str> {
+    let rendered = render_inline_type(ty);
+    let compact = collapse_whitespace(&rendered);
+    Arc::<str>::from(compact.into_boxed_str())
+}
+
+fn collapse_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+#[derive(Debug, Clone)]
+pub struct MethodSignature {
+    pub args: Vec<Arc<str>>,
+    pub rets: Vec<Arc<str>>,
+    pub modes: Vec<FuncMode>,
+}
+
+impl MethodSignature {
+    pub fn from_func(func: &FuncType) -> Self {
+        let args = func.args.iter().map(flatten_type_text).collect::<Vec<_>>();
+        let rets = func.rets.iter().map(flatten_type_text).collect::<Vec<_>>();
+        Self {
+            args,
+            rets,
+            modes: func.modes.clone(),
+        }
+    }
 }
