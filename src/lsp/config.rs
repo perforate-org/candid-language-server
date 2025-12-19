@@ -128,16 +128,14 @@ impl CompletionConfig {
         match value {
             Value::String(raw) => self.apply_mode_string(raw),
             Value::Object(map) => {
-                if let Some(mode) = map.get("mode").and_then(Value::as_str) {
-                    self.apply_mode_string(mode);
-                } else if let Some(mode) = map.get("completionMode").and_then(Value::as_str) {
+                if let Some(mode) = get_value(map, "mode").and_then(Value::as_str) {
                     self.apply_mode_string(mode);
                 }
-                if let Some(auto) = map.get("auto").and_then(Value::as_object) {
-                    if let Some(limit) = auto.get("lineLimit").and_then(Value::as_u64) {
+                if let Some(auto) = get_value(map, "auto").and_then(Value::as_object) {
+                    if let Some(limit) = get_u64(auto, "lineLimit") {
                         self.auto_line_limit = sanitize_limit(limit, self.auto_line_limit);
                     }
-                    if let Some(limit) = auto.get("charLimit").and_then(Value::as_u64) {
+                    if let Some(limit) = get_u64(auto, "charLimit") {
                         self.auto_char_limit = sanitize_limit(limit, self.auto_char_limit);
                     }
                 }
@@ -301,19 +299,19 @@ fn extract_service_snippet_style(value: &Value) -> Option<ServiceSnippetStyle> {
 
 fn style_from_object(value: &Value) -> Option<ServiceSnippetStyle> {
     let obj = value.as_object()?;
-    if let Some(snippets) = obj.get("serviceSnippets")
+    if let Some(snippets) = get_value(obj, "serviceSnippets")
         && let Some(style) = extract_service_snippet_style(snippets)
     {
         return Some(style);
     }
     for key in ["serviceSnippetStyle", "snippetStyle", "snippet", "style"] {
-        if let Some(raw) = obj.get(key).and_then(|value| value.as_str())
+        if let Some(raw) = get_value(obj, key).and_then(Value::as_str)
             && let Ok(style) = ServiceSnippetStyle::from_str(raw)
         {
             return Some(style);
         }
     }
-    if let Some(section) = obj.get("candidLanguageServer") {
+    if let Some(section) = get_value(obj, "candidLanguageServer") {
         return extract_service_snippet_style(section);
     }
     None
@@ -321,10 +319,10 @@ fn style_from_object(value: &Value) -> Option<ServiceSnippetStyle> {
 
 fn completion_section(value: &Value) -> Option<&Value> {
     if let Some(obj) = value.as_object() {
-        if let Some(section) = obj.get("completion") {
+        if let Some(section) = get_value(obj, "completion") {
             return Some(section);
         }
-        if let Some(root) = obj.get("candidLanguageServer") {
+        if let Some(root) = get_value(obj, "candidLanguageServer") {
             return completion_section(root);
         }
     }
@@ -333,10 +331,10 @@ fn completion_section(value: &Value) -> Option<&Value> {
 
 fn format_section(value: &Value) -> Option<&Value> {
     if let Some(obj) = value.as_object() {
-        if let Some(section) = obj.get("format") {
+        if let Some(section) = get_value(obj, "format") {
             return Some(section);
         }
-        if let Some(root) = obj.get("candidLanguageServer") {
+        if let Some(root) = get_value(obj, "candidLanguageServer") {
             return format_section(root);
         }
     }
@@ -348,10 +346,10 @@ fn completion_mode_from_value(value: &Value) -> Option<CompletionModeSetting> {
         return CompletionModeSetting::from_str(text).ok();
     }
     let obj = value.as_object()?;
-    if let Some(mode) = obj.get("completionMode").and_then(Value::as_str) {
+    if let Some(mode) = get_value(obj, "completionMode").and_then(Value::as_str) {
         return CompletionModeSetting::from_str(mode).ok();
     }
-    if let Some(root) = obj.get("candidLanguageServer") {
+    if let Some(root) = get_value(obj, "candidLanguageServer") {
         return completion_mode_from_value(root);
     }
     None
