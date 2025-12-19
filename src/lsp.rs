@@ -62,7 +62,10 @@ pub struct CandidLanguageServer {
 }
 
 impl LanguageServer for CandidLanguageServer {
-    async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
+    async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        if let Some(options) = params.initialization_options {
+            self.apply_settings_value(options);
+        }
         Ok(InitializeResult {
             server_info: None,
             capabilities: ServerCapabilities {
@@ -569,6 +572,22 @@ impl CandidLanguageServer {
             .read()
             .unwrap_or_else(|poison| poison.into_inner());
         guard.format_enabled()
+    }
+
+    pub fn format_indent_width(&self) -> Option<usize> {
+        let guard = self
+            .config
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner());
+        guard.format_indent_width()
+    }
+
+    pub fn format_blank_lines(&self) -> Option<usize> {
+        let guard = self
+            .config
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner());
+        guard.format_blank_lines()
     }
 
     pub fn task_token(&self, uri: &str, kind: DocumentTaskKind) -> DocumentTaskToken {

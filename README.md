@@ -13,10 +13,15 @@ The server reads user preferences via `workspace/configuration`. Editors can sen
   lightweight mode when a document exceeds 2,000 lines or 120k characters.
 - `completion.auto.lineLimit` / `completion.auto.charLimit`: Override auto mode thresholds.
   Limits must be positive integers.
+- `format.enabled`: Enable or disable formatting (default: `true`).
+- `format.indentWidth`: Override indentation width applied after formatting. Must be a
+  positive integer. If omitted, keeps formatter output unchanged.
+- `format.blankLines`: Maximum consecutive blank lines to keep after formatting. If omitted,
+  keeps formatter output unchanged.
 
 Example VS Code-style settings JSON:
 
-```jsonc
+```json
 {
   "candidLanguageServer": {
     "serviceSnippets": {
@@ -27,6 +32,11 @@ Example VS Code-style settings JSON:
       "auto": {
         "lineLimit": 3000
       }
+    },
+    "format": {
+      "enabled": true,
+      "indentWidth": 2,
+      "blankLines": 1
     }
   }
 }

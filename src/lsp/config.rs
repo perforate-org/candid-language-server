@@ -165,11 +165,17 @@ fn sanitize_limit(value: u64, fallback: usize) -> usize {
 #[derive(Debug, Clone)]
 pub struct FormatConfig {
     pub enabled: bool,
+    pub indent_width: Option<usize>,
+    pub blank_lines: Option<usize>,
 }
 
 impl Default for FormatConfig {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            indent_width: None,
+            blank_lines: None,
+        }
     }
 }
 
@@ -183,6 +189,17 @@ impl FormatConfig {
             && let Some(enabled) = obj.get("enabled").and_then(Value::as_bool)
         {
             self.enabled = enabled;
+        }
+        if let Some(obj) = value.as_object() {
+            if let Some(width) = obj.get("indentWidth").and_then(Value::as_u64)
+                && width > 0
+            {
+                self.indent_width = Some(width as usize);
+            }
+
+            if let Some(lines) = obj.get("blankLines").and_then(Value::as_u64) {
+                self.blank_lines = Some(lines as usize);
+            }
         }
     }
 }
@@ -205,6 +222,14 @@ impl ServerConfig {
 
     pub fn format_enabled(&self) -> bool {
         self.format.enabled
+    }
+
+    pub fn format_indent_width(&self) -> Option<usize> {
+        self.format.indent_width
+    }
+
+    pub fn format_blank_lines(&self) -> Option<usize> {
+        self.format.blank_lines
     }
 
     pub fn apply_settings(&mut self, value: Value) {

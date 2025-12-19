@@ -19,13 +19,31 @@ pub async fn format(
         && let Some(ast) = snapshot.ast()
         && let Some(doc) = server.documents.get(uri)
     {
-        Ok(format_program(ast, &doc.rope))
+        let options = FormatOptions {
+            indent_width: server.format_indent_width(),
+            blank_lines: server.format_blank_lines(),
+        };
+        Ok(format_program_with_options(ast, &doc.rope, &options))
     } else {
         Ok(None)
     }
 }
 
 pub fn format_program(ast: &IDLMergedProg, rope: &Rope) -> Option<Vec<TextEdit>> {
+    format_program_with_options(ast, rope, &FormatOptions::default())
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct FormatOptions {
+    pub indent_width: Option<usize>,
+    pub blank_lines: Option<usize>,
+}
+
+pub fn format_program_with_options(
+    ast: &IDLMergedProg,
+    rope: &Rope,
+    options: &FormatOptions,
+) -> Option<Vec<TextEdit>> {
     let original_text = rope.to_string();
     let (imports, service_name) = extract_imports_and_service_name(&original_text);
     let orphan_comments = extract_orphan_comment_blocks(&original_text);
@@ -40,6 +58,12 @@ pub fn format_program(ast: &IDLMergedProg, rope: &Rope) -> Option<Vec<TextEdit>>
     }
     if !orphan_comments.is_empty() {
         formatted_text = inject_orphan_comment_blocks(&formatted_text, &orphan_comments);
+    }
+    if let Some(width) = options.indent_width {
+        formatted_text = apply_indent_width(&formatted_text, width);
+    }
+    if let Some(lines) = options.blank_lines {
+        formatted_text = collapse_blank_lines(&formatted_text, lines);
     }
 
     let last_line_idx = rope.len_lines().saturating_sub(1);
@@ -261,12 +285,10 @@ fn extract_orphan_comment_blocks(src: &str) -> Vec<OrphanCommentBlock> {
                 anchor_prev_occurrence,
                 before_first,
             });
-        } else {
-            if let Some(last) = last_non_comment_idx {
-                if !lines[last].trim().is_empty() {
-                    last_non_comment_idx = Some(last);
-                }
-            }
+        } else if let Some(last) = last_non_comment_idx
+            && !lines[last].trim().is_empty()
+        {
+            last_non_comment_idx = Some(last);
         }
 
         idx = end + 1;
@@ -287,33 +309,28 @@ fn inject_orphan_comment_blocks(formatted: &str, blocks: &[OrphanCommentBlock]) 
         }
 
         let mut inserted = false;
-        if let Some(anchor) = block.anchor_next.as_ref() {
-            if let Some(insert_at) = find_anchor_index(&lines, anchor, block.anchor_next_occurrence)
-            {
-                insert_block_before(&mut lines, insert_at, block);
-                inserted = true;
-            }
+        if let Some(anchor) = block.anchor_next.as_ref()
+            && let Some(insert_at) = find_anchor_index(&lines, anchor, block.anchor_next_occurrence)
+        {
+            insert_block_before(&mut lines, insert_at, block);
+            inserted = true;
         }
 
-        if !inserted {
-            if block.before_first {
-                if let Some(insert_at) = first_content_line_index(&lines) {
-                    insert_block_before(&mut lines, insert_at, block);
-                    inserted = true;
-                }
-            }
+        if !inserted
+            && block.before_first
+            && let Some(insert_at) = first_content_line_index(&lines)
+        {
+            insert_block_before(&mut lines, insert_at, block);
+            inserted = true;
         }
 
-        if !inserted {
-            if let Some(anchor) = block.anchor_prev.as_ref() {
-                if let Some(insert_at) =
-                    find_anchor_index(&lines, anchor, block.anchor_prev_occurrence)
-                {
-                    let after = insert_at + 1;
-                    insert_block_after(&mut lines, after, block);
-                    inserted = true;
-                }
-            }
+        if !inserted
+            && let Some(anchor) = block.anchor_prev.as_ref()
+            && let Some(insert_at) = find_anchor_index(&lines, anchor, block.anchor_prev_occurrence)
+        {
+            let after = insert_at + 1;
+            insert_block_after(&mut lines, after, block);
+            inserted = true;
         }
 
         if !inserted {
@@ -383,4 +400,56 @@ fn is_comment_line(line: &str) -> bool {
 
 fn normalize_line(line: &str) -> String {
     line.chars().filter(|ch| !ch.is_whitespace()).collect()
+}
+
+fn apply_indent_width(formatted: &str, indent_width: usize) -> String {
+    if indent_width == 0 {
+        return formatted.to_string();
+    }
+
+    const BASE_INDENT_WIDTH: usize = 2;
+    let mut output = String::with_capacity(formatted.len());
+    for (idx, line) in formatted.lines().enumerate() {
+        if idx > 0 {
+            output.push('\n');
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let leading_spaces = line.chars().take_while(|ch| *ch == ' ').count();
+        let remainder = &line[leading_spaces..];
+        if leading_spaces % BASE_INDENT_WIDTH != 0 {
+            output.push_str(line);
+            continue;
+        }
+        let level = leading_spaces / BASE_INDENT_WIDTH;
+        output.extend(std::iter::repeat_n(' ', level * indent_width));
+        output.push_str(remainder);
+    }
+    if formatted.ends_with('\n') {
+        output.push('\n');
+    }
+    output
+}
+
+fn collapse_blank_lines(formatted: &str, max_blank_lines: usize) -> String {
+    let mut lines = Vec::new();
+    let mut blank_run = 0usize;
+    for line in formatted.lines() {
+        if line.trim().is_empty() {
+            blank_run += 1;
+            if blank_run <= max_blank_lines {
+                lines.push(line.to_string());
+            }
+            continue;
+        }
+        blank_run = 0;
+        lines.push(line.to_string());
+    }
+    let mut output = lines.join("\n");
+    if formatted.ends_with('\n') {
+        output.push('\n');
+    }
+    output
 }
