@@ -55,3 +55,28 @@ fn formatting_preserves_imports_and_service_name() {
         "import should remain before service declaration"
     );
 }
+
+#[test]
+fn formatting_preserves_orphan_comment_lines() {
+    let text = "// orphan comment\n\nservice : { method : () -> (); }";
+    let rope = Rope::from_str(text);
+    let ParserResult { ast, .. } = parse(text);
+    let ast = ast.expect("parsed AST");
+
+    let edits = format_program(&ast, &rope).expect("edits");
+    let edit = &edits[0];
+
+    assert!(
+        edit.new_text.contains("// orphan comment"),
+        "orphan comment should be preserved"
+    );
+    let comment_pos = edit
+        .new_text
+        .find("// orphan comment")
+        .expect("comment should exist");
+    let service_pos = edit.new_text.find("service").expect("service should exist");
+    assert!(
+        comment_pos < service_pos,
+        "comment should remain before service"
+    );
+}
