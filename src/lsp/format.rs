@@ -252,7 +252,27 @@ fn extract_orphan_comment_blocks(src: &str) -> Vec<OrphanCommentBlock> {
         }
 
         let next_idx = end + 1;
-        if next_idx < lines.len() && lines[next_idx].trim().is_empty() {
+        if next_idx < lines.len() && is_import_line(lines[next_idx]) {
+            let anchor_next_idx = Some(next_idx);
+            let anchor_next = anchor_next_idx.and_then(|i| normalized[i].as_ref().cloned());
+            let anchor_next_occurrence = anchor_next_idx.map(|i| line_occurrence[i]).unwrap_or(0);
+
+            let before_first = last_non_comment_idx.is_none();
+            let anchor_prev = last_non_comment_idx.and_then(|i| normalized[i].as_ref().cloned());
+            let anchor_prev_occurrence = last_non_comment_idx
+                .map(|i| line_occurrence[i])
+                .unwrap_or(0);
+
+            let text = lines[start..=end].join("\n");
+            blocks.push(OrphanCommentBlock {
+                text,
+                anchor_next,
+                anchor_next_occurrence,
+                anchor_prev,
+                anchor_prev_occurrence,
+                before_first,
+            });
+        } else if next_idx < lines.len() && lines[next_idx].trim().is_empty() {
             let anchor_next_idx = (next_idx + 1..lines.len()).find(|i| {
                 let trimmed = lines[*i].trim();
                 !trimmed.is_empty() && !trimmed.starts_with("//")
@@ -420,6 +440,10 @@ fn insert_block_after(
 
 fn is_comment_line(line: &str) -> bool {
     line.trim_start().starts_with("//")
+}
+
+fn is_import_line(line: &str) -> bool {
+    line.trim_start().starts_with("import")
 }
 
 fn normalize_line(line: &str) -> String {

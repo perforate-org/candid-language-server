@@ -80,3 +80,31 @@ fn formatting_preserves_orphan_comment_lines() {
         "comment should remain before service"
     );
 }
+
+#[test]
+fn formatting_preserves_comment_before_import_without_blank_line() {
+    let text = "// import comment\nimport \"./shared.did\";\n\nservice : { method : () -> (); }";
+    let rope = Rope::from_str(text);
+    let ParserResult { ast, .. } = parse(text);
+    let ast = ast.expect("parsed AST");
+
+    let edits = format_program(&ast, &rope).expect("edits");
+    let edit = &edits[0];
+
+    assert!(
+        edit.new_text.contains("// import comment"),
+        "comment should be preserved"
+    );
+    let comment_pos = edit
+        .new_text
+        .find("// import comment")
+        .expect("comment should exist");
+    let import_pos = edit
+        .new_text
+        .find("import \"./shared.did\";")
+        .expect("import should exist");
+    assert!(
+        comment_pos < import_pos,
+        "comment should remain before import"
+    );
+}
