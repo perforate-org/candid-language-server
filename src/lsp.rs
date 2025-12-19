@@ -1,5 +1,5 @@
 use crate::{
-    candid_lang::{CandidError, ParserResult, parse},
+    candid_lang::{CandidError, ImCompleteSemanticToken, ParserResult, parse},
     lsp::{
         completion::CompletionDocumentCache,
         config::{CompletionEngineMode, ServerConfig, ServiceSnippetStyle},
@@ -83,10 +83,6 @@ impl LanguageServer for CandidLanguageServer {
                 completion_provider: Some(CompletionOptions {
                     resolve_provider: Some(false),
                     trigger_characters: Some(vec![".".to_string()]),
-                    ..Default::default()
-                }),
-                execute_command_provider: Some(ExecuteCommandOptions {
-                    commands: vec!["dummy.do_something".to_string()],
                     ..Default::default()
                 }),
                 workspace: Some(WorkspaceServerCapabilities {
@@ -451,6 +447,48 @@ impl LanguageServer for CandidLanguageServer {
         }
         result
     }
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>> {
+        let uri = params.text_document.uri;
+        let uri_label = uri.to_string();
+        self.log_info_event("semantic_tokens_full", format!("uri={}", uri_label))
+            .await;
+        let result = self.semantic_tokens_for_range(&uri_label, None);
+        self.log_info_event(
+            "semantic_tokens_full_result",
+            format!(
+                "uri={} tokens={}",
+                uri_label,
+                result.as_ref().map(|r| r.data.len()).unwrap_or(0)
+            ),
+        )
+        .await;
+        Ok(result.map(SemanticTokensResult::Tokens))
+    }
+
+    async fn semantic_tokens_range(
+        &self,
+        params: SemanticTokensRangeParams,
+    ) -> Result<Option<SemanticTokensRangeResult>> {
+        let uri = params.text_document.uri;
+        let uri_label = uri.to_string();
+        self.log_info_event("semantic_tokens_range", format!("uri={}", uri_label))
+            .await;
+        let result = self.semantic_tokens_for_range(&uri_label, Some(params.range));
+        self.log_info_event(
+            "semantic_tokens_range_result",
+            format!(
+                "uri={} tokens={}",
+                uri_label,
+                result.as_ref().map(|r| r.data.len()).unwrap_or(0)
+            ),
+        )
+        .await;
+        Ok(result.map(SemanticTokensRangeResult::Tokens))
+    }
 }
 
 #[allow(unused)]
@@ -492,6 +530,7 @@ pub struct AnalysisSnapshot {
     ast: Option<IDLMergedProg>,
     semantic: Option<Semantic>,
     completion_cache: Option<CompletionDocumentCache>,
+    semantic_tokens: Vec<ImCompleteSemanticToken>,
     parse_errors: usize,
     version: Option<i32>,
 }
@@ -501,6 +540,7 @@ impl AnalysisSnapshot {
         ast: Option<IDLMergedProg>,
         semantic: Option<Semantic>,
         completion_cache: Option<CompletionDocumentCache>,
+        semantic_tokens: Vec<ImCompleteSemanticToken>,
         parse_errors: usize,
         version: Option<i32>,
     ) -> Self {
@@ -508,6 +548,7 @@ impl AnalysisSnapshot {
             ast,
             semantic,
             completion_cache,
+            semantic_tokens,
             parse_errors,
             version,
         }
@@ -523,6 +564,10 @@ impl AnalysisSnapshot {
 
     fn completion_cache(&self) -> Option<&CompletionDocumentCache> {
         self.completion_cache.as_ref()
+    }
+
+    fn semantic_tokens(&self) -> &[ImCompleteSemanticToken] {
+        &self.semantic_tokens
     }
 
     fn has_parse_errors(&self) -> bool {
@@ -699,7 +744,9 @@ impl CandidLanguageServer {
         }
 
         let ParserResult {
-            ast, parse_errors, ..
+            ast,
+            parse_errors,
+            semantic_tokens,
         } = parse(&text);
         let parse_error_count = parse_errors.len();
         self.log_info_event(
@@ -765,6 +812,7 @@ impl CandidLanguageServer {
                         Some(ast),
                         Some(semantic),
                         completion_cache,
+                        semantic_tokens,
                         parse_error_count,
                         version,
                     ))
@@ -801,6 +849,7 @@ impl CandidLanguageServer {
                         Some(ast),
                         None,
                         completion_cache,
+                        semantic_tokens,
                         parse_error_count,
                         version,
                     ))
@@ -809,7 +858,15 @@ impl CandidLanguageServer {
         } else {
             self.log_info_event("semantic", format!("uri={} status=no-ast", uri_key))
                 .await;
-            None
+            let completion_cache = CompletionDocumentCache::build(None, None, version);
+            Some(AnalysisSnapshot::new(
+                None,
+                None,
+                completion_cache,
+                semantic_tokens,
+                parse_error_count,
+                version,
+            ))
         };
 
         if let Some(snapshot) = analysis_snapshot {
@@ -847,6 +904,16 @@ impl CandidLanguageServer {
         }
 
         Some(offset)
+    }
+
+    fn semantic_tokens_for_range(&self, uri: &str, range: Option<Range>) -> Option<SemanticTokens> {
+        let analysis = self.analysis_map.get(uri)?;
+        let doc = self.documents.get(uri)?;
+        Some(build_semantic_tokens(
+            analysis.semantic_tokens(),
+            doc.rope(),
+            range,
+        ))
     }
 }
 
@@ -933,6 +1000,62 @@ fn range_offsets(start_offset: usize, end_offset: usize, rope: &Rope) -> Range {
     ) {
         (Some(start), Some(end)) => Range::new(start, end),
         _ => Range::default(),
+    }
+}
+
+fn build_semantic_tokens(
+    tokens: &[ImCompleteSemanticToken],
+    rope: &Rope,
+    range: Option<Range>,
+) -> SemanticTokens {
+    let range_bounds = range.and_then(|range| {
+        let start = position_to_offset(range.start, rope)?;
+        let end = position_to_offset(range.end, rope)?;
+        Some((start, end))
+    });
+
+    let mut data: Vec<SemanticToken> = Vec::with_capacity(tokens.len());
+    let mut prev_line: u32 = 0;
+    let mut prev_char: u32 = 0;
+
+    for token in tokens {
+        let token_start = token.start;
+        let token_end = token_start.saturating_add(token.length);
+        if let Some((range_start, range_end)) = range_bounds
+            && (token_end <= range_start || token_start >= range_end)
+        {
+            continue;
+        }
+
+        let position = match offset_to_position(token_start, rope) {
+            Some(pos) => pos,
+            None => continue,
+        };
+
+        let delta_line = position.line.saturating_sub(prev_line);
+        let delta_start = if delta_line == 0 {
+            position.character.saturating_sub(prev_char)
+        } else {
+            position.character
+        };
+        let length = u32::try_from(token.length).unwrap_or(u32::MAX);
+        let token_type = u32::try_from(token.token_type).unwrap_or(0);
+
+        data.push(SemanticToken {
+            delta_line,
+            delta_start,
+            length,
+            token_type,
+            token_modifiers_bitset: 0,
+        });
+
+        prev_line = position.line;
+        prev_char = position.character;
+    }
+
+    SemanticTokens {
+        result_id: None,
+        data,
     }
 }
 
