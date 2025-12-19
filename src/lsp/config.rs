@@ -185,23 +185,66 @@ impl FormatConfig {
             self.enabled = enabled;
             return;
         }
-        if let Some(obj) = value.as_object()
-            && let Some(enabled) = obj.get("enabled").and_then(Value::as_bool)
-        {
-            self.enabled = enabled;
-        }
         if let Some(obj) = value.as_object() {
-            if let Some(width) = obj.get("indentWidth").and_then(Value::as_u64)
+            if let Some(enabled) = get_bool(obj, "enabled") {
+                self.enabled = enabled;
+            }
+            if let Some(width) = get_u64(obj, "indentWidth")
                 && width > 0
             {
                 self.indent_width = Some(width as usize);
             }
-
-            if let Some(lines) = obj.get("blankLines").and_then(Value::as_u64) {
+            if let Some(lines) = get_u64(obj, "blankLines") {
                 self.blank_lines = Some(lines as usize);
             }
         }
     }
+}
+
+fn get_bool(obj: &serde_json::Map<String, Value>, key: &str) -> Option<bool> {
+    get_value(obj, key).and_then(Value::as_bool)
+}
+
+fn get_u64(obj: &serde_json::Map<String, Value>, key: &str) -> Option<u64> {
+    get_value(obj, key).and_then(Value::as_u64)
+}
+
+fn get_value<'a>(obj: &'a serde_json::Map<String, Value>, key: &str) -> Option<&'a Value> {
+    let snake = to_snake_case(key);
+    let kebab = to_kebab_case(key);
+    obj.get(key)
+        .or_else(|| obj.get(&snake))
+        .or_else(|| obj.get(&kebab))
+}
+
+fn to_snake_case(key: &str) -> String {
+    let mut output = String::with_capacity(key.len());
+    for (idx, ch) in key.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if idx > 0 {
+                output.push('_');
+            }
+            output.push(ch.to_ascii_lowercase());
+        } else {
+            output.push(ch);
+        }
+    }
+    output
+}
+
+fn to_kebab_case(key: &str) -> String {
+    let mut output = String::with_capacity(key.len());
+    for (idx, ch) in key.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if idx > 0 {
+                output.push('-');
+            }
+            output.push(ch.to_ascii_lowercase());
+        } else {
+            output.push(ch);
+        }
+    }
+    output
 }
 
 #[derive(Debug, Clone, Default)]

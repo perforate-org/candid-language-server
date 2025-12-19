@@ -19,6 +19,8 @@ The server reads user preferences via `workspace/configuration`. Editors can sen
 - `format.blankLines`: Maximum consecutive blank lines to keep after formatting. If omitted,
   keeps formatter output unchanged.
 
+These keys accept `camelCase`, `snake_case`, or `kebab-case` variants.
+
 Example VS Code-style settings JSON:
 
 ```json
