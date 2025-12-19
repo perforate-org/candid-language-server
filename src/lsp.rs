@@ -11,7 +11,7 @@ use crate::{
 };
 use candid_parser::{
     candid::{Error as CandidCoreError, error::Label as CandidLabel},
-    syntax::IDLProg,
+    syntax::IDLMergedProg,
     token::{LexicalError, Token},
 };
 use dashmap::DashMap;
@@ -33,6 +33,7 @@ use tower_lsp_server::{
 
 pub mod completion;
 pub mod config;
+pub mod format;
 pub mod hover;
 pub mod markdown;
 pub mod navigation;
@@ -46,6 +47,7 @@ pub mod type_display;
 pub mod type_docs;
 
 use completion::completion as completion_handler;
+use format::format as format_handler;
 use hover::hover;
 use semantic_token::LEGEND_TYPES;
 
@@ -64,8 +66,16 @@ impl LanguageServer for CandidLanguageServer {
         Ok(InitializeResult {
             server_info: None,
             capabilities: ServerCapabilities {
-                text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                    TextDocumentSyncKind::INCREMENTAL,
+                text_document_sync: Some(TextDocumentSyncCapability::Options(
+                    TextDocumentSyncOptions {
+                        open_close: Some(true),
+                        change: Some(TextDocumentSyncKind::INCREMENTAL),
+                        will_save: None,
+                        will_save_wait_until: Some(true),
+                        save: Some(TextDocumentSyncSaveOptions::SaveOptions(SaveOptions {
+                            include_text: Some(true),
+                        })),
+                    },
                 )),
                 completion_provider: Some(CompletionOptions {
                     resolve_provider: Some(false),
@@ -100,6 +110,7 @@ impl LanguageServer for CandidLanguageServer {
                 ),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                document_formatting_provider: Some(OneOf::Left(true)),
                 ..ServerCapabilities::default()
             },
             #[cfg(feature = "proposed")]
@@ -358,6 +369,85 @@ impl LanguageServer for CandidLanguageServer {
         }
         result
     }
+
+    async fn will_save_wait_until(
+        &self,
+        params: WillSaveTextDocumentParams,
+    ) -> Result<Option<Vec<TextEdit>>> {
+        let uri = params.text_document.uri;
+        let uri_label = uri.to_string();
+        self.log_info_event("will_save_wait_until", format!("uri={}", uri_label))
+            .await;
+
+        let options = FormattingOptions {
+            tab_size: 2,
+            insert_spaces: true,
+            ..Default::default()
+        };
+
+        let params = DocumentFormattingParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            options,
+            work_done_progress_params: WorkDoneProgressParams {
+                work_done_token: None,
+            },
+        };
+
+        let result = format_handler(self, params).await;
+        match &result {
+            Ok(Some(_)) => {
+                self.log_info_event(
+                    "will_save_wait_until_result",
+                    format!("uri={} success=true", uri_label),
+                )
+                .await;
+            }
+            Ok(None) => {
+                self.log_info_event(
+                    "will_save_wait_until_result",
+                    format!("uri={} success=false", uri_label),
+                )
+                .await;
+            }
+            Err(err) => {
+                self.log_warn_event(
+                    "will_save_wait_until_error",
+                    format!("uri={} error={err}", uri_label),
+                )
+                .await;
+            }
+        }
+        result
+    }
+
+    async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
+        let uri = params.text_document.uri.clone();
+        let uri_label = uri.to_string();
+        self.log_info_event("formatting", format!("uri={}", uri_label))
+            .await;
+        let result = format_handler(self, params).await;
+        match &result {
+            Ok(Some(_)) => {
+                self.log_info_event(
+                    "formatting_result",
+                    format!("uri={} success=true", uri_label),
+                )
+                .await;
+            }
+            Ok(None) => {
+                self.log_info_event(
+                    "formatting_result",
+                    format!("uri={} success=false", uri_label),
+                )
+                .await;
+            }
+            Err(err) => {
+                self.log_warn_event("formatting_error", format!("uri={} error={err}", uri_label))
+                    .await;
+            }
+        }
+        result
+    }
 }
 
 #[allow(unused)]
@@ -396,28 +486,31 @@ impl DocumentSnapshot {
 
 #[derive(Debug)]
 pub struct AnalysisSnapshot {
-    ast: Option<IDLProg>,
+    ast: Option<IDLMergedProg>,
     semantic: Option<Semantic>,
     completion_cache: Option<CompletionDocumentCache>,
+    parse_errors: usize,
     version: Option<i32>,
 }
 
 impl AnalysisSnapshot {
     fn new(
-        ast: Option<IDLProg>,
+        ast: Option<IDLMergedProg>,
         semantic: Option<Semantic>,
         completion_cache: Option<CompletionDocumentCache>,
+        parse_errors: usize,
         version: Option<i32>,
     ) -> Self {
         Self {
             ast,
             semantic,
             completion_cache,
+            parse_errors,
             version,
         }
     }
 
-    fn ast(&self) -> Option<&IDLProg> {
+    fn ast(&self) -> Option<&IDLMergedProg> {
         self.ast.as_ref()
     }
 
@@ -427,6 +520,10 @@ impl AnalysisSnapshot {
 
     fn completion_cache(&self) -> Option<&CompletionDocumentCache> {
         self.completion_cache.as_ref()
+    }
+
+    fn has_parse_errors(&self) -> bool {
+        self.parse_errors > 0
     }
 
     #[allow(dead_code)]
@@ -464,6 +561,14 @@ impl CandidLanguageServer {
             .read()
             .unwrap_or_else(|poison| poison.into_inner());
         guard.completion_mode_for(rope)
+    }
+
+    pub fn format_enabled(&self) -> bool {
+        let guard = self
+            .config
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner());
+        guard.format_enabled()
     }
 
     pub fn task_token(&self, uri: &str, kind: DocumentTaskKind) -> DocumentTaskToken {
@@ -577,9 +682,10 @@ impl CandidLanguageServer {
         let ParserResult {
             ast, parse_errors, ..
         } = parse(&text);
+        let parse_error_count = parse_errors.len();
         self.log_info_event(
             "parse",
-            format!("uri={} parse_errors={}", uri_key, parse_errors.len()),
+            format!("uri={} parse_errors={}", uri_key, parse_error_count),
         )
         .await;
 
@@ -640,6 +746,7 @@ impl CandidLanguageServer {
                         Some(ast),
                         Some(semantic),
                         completion_cache,
+                        parse_error_count,
                         version,
                     ))
                 }
@@ -675,6 +782,7 @@ impl CandidLanguageServer {
                         Some(ast),
                         None,
                         completion_cache,
+                        parse_error_count,
                         version,
                     ))
                 }

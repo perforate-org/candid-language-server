@@ -16,7 +16,7 @@ use crate::lsp::{
 };
 use candid_parser::{
     candid::types::internal::FuncMode,
-    syntax::{Dec, IDLProg, IDLType, IDLTypeWithSpan},
+    syntax::{Dec, IDLMergedProg, IDLType, IDLTypeWithSpan},
 };
 use once_cell::sync::OnceCell;
 use rapidhash::fast::RandomState;
@@ -125,7 +125,6 @@ impl<'a> BuildCompletionItemsParams<'a> {
     }
 }
 
-
 #[cfg(feature = "tracing")]
 impl<'a> Drop for PhaseTimer<'a> {
     fn drop(&mut self) {
@@ -141,7 +140,7 @@ impl<'a> Drop for PhaseTimer<'a> {
 
 impl CompletionDocumentCache {
     pub fn build(
-        ast: Option<&IDLProg>,
+        ast: Option<&IDLMergedProg>,
         semantic: Option<&Semantic>,
         version: Option<i32>,
     ) -> Option<Self> {
@@ -163,7 +162,7 @@ impl CompletionDocumentCache {
     fn spans<'a>(
         &'a self,
         version: Option<i32>,
-        ast: Option<&'a IDLProg>,
+        ast: Option<&'a IDLMergedProg>,
         semantic: Option<&'a Semantic>,
         rope: Option<&'a Rope>,
     ) -> Option<&'a ContextSpans> {
@@ -205,7 +204,7 @@ impl CompletionDocumentCache {
 
 impl ContextSpans {
     pub fn from_sources(
-        ast: Option<&IDLProg>,
+        ast: Option<&IDLMergedProg>,
         semantic: Option<&Semantic>,
         rope: Option<&Rope>,
     ) -> Option<Self> {
@@ -287,8 +286,8 @@ impl ContextSpans {
         }
     }
 
-    fn collect_from_ast(&mut self, ast: &IDLProg, rope: Option<&Rope>) {
-        for dec in ast.decs.iter() {
+    fn collect_from_ast(&mut self, ast: &IDLMergedProg, rope: Option<&Rope>) {
+        for dec in ast.decs().iter() {
             match dec {
                 Dec::TypD(binding) => {
                     if let Some(rope) = rope
@@ -303,7 +302,7 @@ impl ContextSpans {
                 }
             }
         }
-        if let Some(actor) = &ast.actor {
+        if let Some(actor) = &ast.resolve_actor().ok().flatten() {
             self.collect_type_from(&actor.typ, rope);
             self.add_type_span(&actor.span);
         }
@@ -758,7 +757,7 @@ fn determine_context(
     offset: Option<usize>,
     cached: Option<&CompletionDocumentCache>,
     semantic: Option<&Semantic>,
-    ast: Option<&IDLProg>,
+    ast: Option<&IDLMergedProg>,
     rope: &Rope,
     cursor_context: Option<&CursorContext>,
     version: Option<i32>,
@@ -1337,7 +1336,7 @@ pub mod bench_support {
     pub struct CompletionBenchFixture {
         source: String,
         rope: Rope,
-        ast: IDLProg,
+        ast: IDLMergedProg,
         semantic: Semantic,
         cache: Option<CompletionDocumentCache>,
     }
@@ -1379,19 +1378,17 @@ pub mod bench_support {
                 .cache
                 .as_ref()
                 .and_then(|cache| cache.scope_index(Some(&self.semantic), None));
-            build_completion_items_sync(
-                BuildCompletionItemsParams::new(
-                    context,
-                    Some(&self.semantic),
-                    &self.rope,
-                    style,
-                    scope_index,
-                    Some(offset),
-                    cursor_context.inside_service_block(),
-                    Some(&cursor_context),
-                    false,
-                ),
-            )
+            build_completion_items_sync(BuildCompletionItemsParams::new(
+                context,
+                Some(&self.semantic),
+                &self.rope,
+                style,
+                scope_index,
+                Some(offset),
+                cursor_context.inside_service_block(),
+                Some(&cursor_context),
+                false,
+            ))
             .len()
         }
 

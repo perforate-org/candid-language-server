@@ -203,6 +203,32 @@ async fn hover_keyword_service_displays_doc() {
 }
 
 #[tokio::test]
+async fn hover_keyword_import_displays_doc() {
+    let text = "import \"./shared.did\";\n\ntype Foo = nat;";
+    let rope = Rope::from_str(text);
+    let ParserResult { ast, .. } = parse(text);
+    let ast = ast.expect("parsed AST");
+    let semantic = analyze_program(&ast, &rope).expect("semantic");
+
+    let offset = text.find("import").expect("import keyword span");
+    let info = lookup_identifier(&semantic, offset).expect("lookup import");
+
+    let hover = hover_contents(&rope, &semantic, &info, None)
+        .await
+        .expect("task cancelled")
+        .expect("hover result");
+    let HoverContents::Markup(markup) = hover else {
+        panic!("expected markup");
+    };
+    let expected_doc = keyword_doc(KeywordDoc::Import).expect("import doc");
+    assert_eq!(
+        markup.value.trim(),
+        expected_doc.trim(),
+        "import keyword hover should render keyword docs only"
+    );
+}
+
+#[tokio::test]
 async fn hover_actor_name_displays_docs() {
     let (text, rope) = load_fixture();
     let ParserResult { ast, .. } = parse(&text);

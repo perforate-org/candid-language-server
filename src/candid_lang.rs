@@ -1,6 +1,6 @@
 use crate::lsp::semantic_token::semantic_token_type_index;
 use candid_parser::{
-    syntax::IDLProg,
+    syntax::{IDLMergedProg, IDLProg},
     token::{LexicalError, Token, Tokenizer, TriviaMap},
 };
 use lalrpop_util::ParseError;
@@ -30,7 +30,7 @@ pub struct ImCompleteSemanticToken {
 /// Aggregated parse output containing the AST, errors, and semantic-token data.
 #[derive(Debug)]
 pub struct ParserResult {
-    pub ast: Option<IDLProg>,
+    pub ast: Option<IDLMergedProg>,
     pub parse_errors: Vec<CandidError>,
     pub semantic_tokens: Vec<ImCompleteSemanticToken>,
 }
@@ -40,6 +40,7 @@ pub fn parse(src: &str) -> ParserResult {
     let trivia = TriviaMap::default();
     let mut tokenizer = RecordingTokenizer::new(src, trivia.clone());
     let (ast, parser_errors) = IDLProg::parse_lossy_from_tokens(Some(&trivia), &mut tokenizer);
+    let ast = ast.map(IDLMergedProg::new);
 
     let (semantic_tokens, lexer_errors) = tokenizer.into_parts();
     let mut parse_errors: Vec<CandidError> = lexer_errors

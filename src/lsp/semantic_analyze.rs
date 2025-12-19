@@ -8,7 +8,7 @@ use candid_parser::candid::types::internal::FuncMode;
 use candid_parser::{
     candid::types::Label,
     syntax::{
-        Binding, Dec, FuncType, IDLActorType, IDLProg, IDLType, IDLTypeWithSpan, PrimType,
+        Binding, Dec, FuncType, IDLActorType, IDLMergedProg, IDLType, IDLTypeWithSpan, PrimType,
         TypeField,
     },
 };
@@ -343,6 +343,77 @@ impl<'a> Ctx<'a> {
         self.register_keyword_within(span, keyword, true);
     }
 
+    fn register_import_keyword(&mut self, span: Span, path: &str) {
+        if span.start < span.end {
+            let line_idx = self.rope.char_to_line(span.start);
+            let line_start = self.rope.line_to_char(line_idx);
+            let line_end = line_start + self.rope.line(line_idx).len_chars();
+            let line_span = line_start..line_end;
+            if let Some(keyword_span) =
+                find_identifier_span(self.rope, line_span, KeywordDoc::Import.keyword(), false)
+            {
+                self.keyword_spans.push((keyword_span, KeywordDoc::Import));
+                return;
+            }
+        }
+
+        let needle = path;
+        let quoted = format!("\"{path}\"");
+        for line_idx in 0..self.rope.len_lines() {
+            let line = self.rope.line(line_idx).to_string();
+            if !line.contains("import") {
+                continue;
+            }
+            if !line.contains(needle) && !line.contains(&quoted) {
+                continue;
+            }
+
+            if let Some(idx) = line.find("import") {
+                let line_start = self.rope.line_to_char(line_idx);
+                let leading_chars = line[..idx].chars().count();
+                let start = line_start + leading_chars;
+                let len_chars = "import".chars().count();
+                self.keyword_spans
+                    .push((start..start + len_chars, KeywordDoc::Import));
+                return;
+            }
+        }
+    }
+
+    fn register_import_keywords_from_text(&mut self) {
+        let needle = KeywordDoc::Import.keyword();
+        let needle_len = needle.chars().count();
+
+        for line_idx in 0..self.rope.len_lines() {
+            let line = self.rope.line(line_idx);
+            let line_text = line.to_string();
+            let trimmed = line_text.trim_start();
+            if !trimmed.starts_with(needle) {
+                continue;
+            }
+
+            let after = trimmed[needle.len()..].chars().next();
+            if let Some(next) = after
+                && !(next.is_whitespace() || next == '"')
+            {
+                continue;
+            }
+
+            let leading_chars = line_text.len() - trimmed.len();
+            let line_start = self.rope.line_to_char(line_idx);
+            let start = line_start + leading_chars;
+            let span = start..start + needle_len;
+            if self
+                .keyword_spans
+                .iter()
+                .any(|(existing, kind)| *kind == KeywordDoc::Import && *existing == span)
+            {
+                continue;
+            }
+            self.keyword_spans.push((span, KeywordDoc::Import));
+        }
+    }
+
     fn register_keyword_within(&mut self, span: Span, keyword: KeywordDoc, from_end: bool) {
         if span.start >= span.end {
             return;
@@ -355,7 +426,7 @@ impl<'a> Ctx<'a> {
     }
 }
 
-pub fn analyze_program(ast: &IDLProg, rope: &Rope) -> Result<Semantic> {
+pub fn analyze_program(ast: &IDLMergedProg, rope: &Rope) -> Result<Semantic> {
     let table = SymbolTable::default();
     let env = im_rc::Vector::new();
     let fields = IndexVec::new();
@@ -378,7 +449,7 @@ pub fn analyze_program(ast: &IDLProg, rope: &Rope) -> Result<Semantic> {
         type_name_stack: Vec::new(),
         scope_stack: Vec::new(),
     };
-    for dec in ast.decs.iter() {
+    for dec in ast.decs().iter() {
         match dec {
             Dec::TypD(binding) => {
                 ctx.register_keyword(binding.span.clone(), KeywordDoc::Type);
@@ -400,23 +471,27 @@ pub fn analyze_program(ast: &IDLProg, rope: &Rope) -> Result<Semantic> {
             Dec::ImportType { path, span } => {
                 ctx.table
                     .add_import(span.clone(), path.clone(), ImportKind::Type);
+                ctx.register_import_keyword(span.clone(), path);
                 ctx.register_symbol_slot();
             }
             Dec::ImportServ { path, span } => {
                 ctx.table
                     .add_import(span.clone(), path.clone(), ImportKind::Service);
+                ctx.register_import_keyword(span.clone(), path);
                 ctx.register_symbol_slot();
             }
         }
     }
 
-    for dec in ast.decs.iter() {
+    for dec in ast.decs().iter() {
         analyze_dec(dec, &mut ctx)?;
     }
 
-    if let Some(actor) = &ast.actor {
+    if let Some(actor) = &ast.resolve_actor().ok().flatten() {
         analyze_actor(actor, &mut ctx)?;
     }
+
+    ctx.register_import_keywords_from_text();
 
     let mut ident_range = IdentRangeLapper::new(vec![]);
     for (symbol_id, range) in ctx.table.symbol_id_to_span.iter_enumerated() {

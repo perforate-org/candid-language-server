@@ -1,4 +1,4 @@
-use std::{sync::Arc, hint::black_box};
+use std::{hint::black_box, sync::Arc};
 
 use candid_language_server::lsp::{
     completion::bench_support::{CompletionBenchFixture, CursorContextSnapshot},

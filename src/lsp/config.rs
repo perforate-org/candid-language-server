@@ -162,10 +162,36 @@ fn sanitize_limit(value: u64, fallback: usize) -> usize {
     if limit == 0 { fallback } else { limit }
 }
 
+#[derive(Debug, Clone)]
+pub struct FormatConfig {
+    pub enabled: bool,
+}
+
+impl Default for FormatConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+impl FormatConfig {
+    fn apply_section(&mut self, value: &Value) {
+        if let Some(enabled) = value.as_bool() {
+            self.enabled = enabled;
+            return;
+        }
+        if let Some(obj) = value.as_object()
+            && let Some(enabled) = obj.get("enabled").and_then(Value::as_bool)
+        {
+            self.enabled = enabled;
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ServerConfig {
     service_snippets: ServiceSnippetConfig,
     completion: CompletionConfig,
+    format: FormatConfig,
 }
 
 impl ServerConfig {
@@ -177,6 +203,10 @@ impl ServerConfig {
         self.completion.behavior_for(rope)
     }
 
+    pub fn format_enabled(&self) -> bool {
+        self.format.enabled
+    }
+
     pub fn apply_settings(&mut self, value: Value) {
         if let Some(style) = extract_service_snippet_style(&value) {
             self.service_snippets.set_style(style);
@@ -185,6 +215,9 @@ impl ServerConfig {
             self.completion.apply_section(section);
         } else if let Some(mode) = completion_mode_from_value(&value) {
             self.completion.set_mode(mode);
+        }
+        if let Some(section) = format_section(&value) {
+            self.format.apply_section(section);
         }
     }
 }
@@ -225,6 +258,18 @@ fn completion_section(value: &Value) -> Option<&Value> {
         }
         if let Some(root) = obj.get("candidLanguageServer") {
             return completion_section(root);
+        }
+    }
+    None
+}
+
+fn format_section(value: &Value) -> Option<&Value> {
+    if let Some(obj) = value.as_object() {
+        if let Some(section) = obj.get("format") {
+            return Some(section);
+        }
+        if let Some(root) = obj.get("candidLanguageServer") {
+            return format_section(root);
         }
     }
     None
