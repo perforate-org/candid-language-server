@@ -81,64 +81,60 @@ pub fn format_program_with_options(
 }
 
 fn extract_imports_and_service_name(src: &str) -> (Vec<String>, Option<String>) {
-    (extract_imports(src), extract_service_name(src))
-}
-
-fn extract_imports(src: &str) -> Vec<String> {
     let mut imports = Vec::new();
+    let mut service_name = None;
     let mut lines = src.lines().peekable();
 
     while let Some(line) = lines.next() {
         let trimmed = line.trim_start();
-        if !trimmed.starts_with("import") {
-            continue;
-        }
-
-        let mut statement = String::from(line);
-        if !line.trim_end().ends_with(';') {
-            for next in &mut lines {
-                statement.push('\n');
-                statement.push_str(next);
-                if next.trim_end().ends_with(';') {
-                    break;
+        if trimmed.starts_with("import") {
+            let mut statement = String::from(line);
+            if !line.trim_end().ends_with(';') {
+                for next in &mut lines {
+                    statement.push('\n');
+                    statement.push_str(next);
+                    if next.trim_end().ends_with(';') {
+                        break;
+                    }
                 }
             }
+            imports.push(statement);
+            continue;
         }
 
-        imports.push(statement);
+        if service_name.is_none() {
+            service_name = extract_service_name_from_line(trimmed);
+        }
     }
 
-    imports
+    (imports, service_name)
 }
 
-fn extract_service_name(src: &str) -> Option<String> {
-    for line in src.lines() {
-        let trimmed = line.trim_start();
-        if !trimmed.starts_with("service") {
-            continue;
-        }
+fn extract_service_name_from_line(trimmed: &str) -> Option<String> {
+    if !trimmed.starts_with("service") {
+        return None;
+    }
 
-        let rest = trimmed["service".len()..].trim_start();
-        let mut chars = rest.char_indices();
-        let (start_idx, first) = chars.next()?;
-        if !is_ident_start(first) {
-            continue;
-        }
+    let rest = trimmed["service".len()..].trim_start();
+    let mut chars = rest.char_indices();
+    let (start_idx, first) = chars.next()?;
+    if !is_ident_start(first) {
+        return None;
+    }
 
-        let mut end_idx = start_idx + first.len_utf8();
-        for (idx, ch) in chars {
-            if !is_ident_continue(ch) {
-                end_idx = idx;
-                break;
-            }
-            end_idx = idx + ch.len_utf8();
+    let mut end_idx = start_idx + first.len_utf8();
+    for (idx, ch) in chars {
+        if !is_ident_continue(ch) {
+            end_idx = idx;
+            break;
         }
+        end_idx = idx + ch.len_utf8();
+    }
 
-        let name = &rest[start_idx..end_idx];
-        let after = rest[end_idx..].trim_start();
-        if after.starts_with(':') {
-            return Some(name.to_string());
-        }
+    let name = &rest[start_idx..end_idx];
+    let after = rest[end_idx..].trim_start();
+    if after.starts_with(':') {
+        return Some(name.to_string());
     }
 
     None
@@ -216,7 +212,7 @@ struct OrphanCommentBlock {
 
 fn extract_orphan_comment_blocks(src: &str) -> Vec<OrphanCommentBlock> {
     let lines: Vec<&str> = src.lines().collect();
-    let mut normalized = Vec::with_capacity(lines.len());
+    let mut normalized: Vec<Option<String>> = Vec::with_capacity(lines.len());
     let mut line_occurrence = vec![0usize; lines.len()];
     let mut seen_counts: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
@@ -224,7 +220,7 @@ fn extract_orphan_comment_blocks(src: &str) -> Vec<OrphanCommentBlock> {
     for (idx, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with("//") {
-            normalized.push(String::new());
+            normalized.push(None);
             continue;
         }
         let norm = normalize_line(trimmed);
@@ -233,7 +229,7 @@ fn extract_orphan_comment_blocks(src: &str) -> Vec<OrphanCommentBlock> {
             .and_modify(|c| *c += 1)
             .or_insert(1);
         line_occurrence[idx] = *count;
-        normalized.push(norm);
+        normalized.push(Some(norm));
     }
 
     let mut blocks = Vec::new();
@@ -261,17 +257,11 @@ fn extract_orphan_comment_blocks(src: &str) -> Vec<OrphanCommentBlock> {
                 let trimmed = lines[*i].trim();
                 !trimmed.is_empty() && !trimmed.starts_with("//")
             });
-            let anchor_next = anchor_next_idx.and_then(|i| {
-                let norm = normalized[i].clone();
-                if norm.is_empty() { None } else { Some(norm) }
-            });
+            let anchor_next = anchor_next_idx.and_then(|i| normalized[i].as_ref().cloned());
             let anchor_next_occurrence = anchor_next_idx.map(|i| line_occurrence[i]).unwrap_or(0);
 
             let before_first = last_non_comment_idx.is_none();
-            let anchor_prev = last_non_comment_idx.and_then(|i| {
-                let norm = normalized[i].clone();
-                if norm.is_empty() { None } else { Some(norm) }
-            });
+            let anchor_prev = last_non_comment_idx.and_then(|i| normalized[i].as_ref().cloned());
             let anchor_prev_occurrence = last_non_comment_idx
                 .map(|i| line_occurrence[i])
                 .unwrap_or(0);
@@ -302,7 +292,8 @@ fn inject_orphan_comment_blocks(formatted: &str, blocks: &[OrphanCommentBlock]) 
         return formatted.to_string();
     }
 
-    let mut lines: Vec<String> = formatted.lines().map(|line| line.to_string()).collect();
+    let mut lines: Vec<std::borrow::Cow<'_, str>> =
+        formatted.lines().map(std::borrow::Cow::Borrowed).collect();
     for block in blocks {
         if formatted.contains(&block.text) {
             continue;
@@ -334,20 +325,32 @@ fn inject_orphan_comment_blocks(formatted: &str, blocks: &[OrphanCommentBlock]) 
         }
 
         if !inserted {
-            if !lines.is_empty() && !lines.last().unwrap().trim().is_empty() {
-                lines.push(String::new());
+            if !lines.is_empty() && !lines.last().unwrap().as_ref().trim().is_empty() {
+                lines.push(std::borrow::Cow::Borrowed(""));
             }
-            lines.extend(block.text.lines().map(|line| line.to_string()));
-            lines.push(String::new());
+            lines.extend(
+                block
+                    .text
+                    .lines()
+                    .map(|line| std::borrow::Cow::Owned(line.to_string())),
+            );
+            lines.push(std::borrow::Cow::Borrowed(""));
         }
     }
 
-    lines.join("\n")
+    let mut output = String::new();
+    for (idx, line) in lines.iter().enumerate() {
+        if idx > 0 {
+            output.push('\n');
+        }
+        output.push_str(line.as_ref());
+    }
+    output
 }
 
-fn first_content_line_index(lines: &[String]) -> Option<usize> {
+fn first_content_line_index(lines: &[std::borrow::Cow<'_, str>]) -> Option<usize> {
     for (idx, line) in lines.iter().enumerate() {
-        let trimmed = line.trim();
+        let trimmed = line.as_ref().trim();
         if trimmed.is_empty() || trimmed.starts_with("//") {
             continue;
         }
@@ -356,13 +359,17 @@ fn first_content_line_index(lines: &[String]) -> Option<usize> {
     None
 }
 
-fn find_anchor_index(lines: &[String], anchor: &str, occurrence: usize) -> Option<usize> {
+fn find_anchor_index(
+    lines: &[std::borrow::Cow<'_, str>],
+    anchor: &str,
+    occurrence: usize,
+) -> Option<usize> {
     if occurrence == 0 {
         return None;
     }
     let mut count = 0usize;
     for (idx, line) in lines.iter().enumerate() {
-        let trimmed = line.trim();
+        let trimmed = line.as_ref().trim();
         if trimmed.is_empty() || trimmed.starts_with("//") {
             continue;
         }
@@ -376,21 +383,38 @@ fn find_anchor_index(lines: &[String], anchor: &str, occurrence: usize) -> Optio
     None
 }
 
-fn insert_block_before(lines: &mut Vec<String>, insert_at: usize, block: &OrphanCommentBlock) {
-    let mut chunk: Vec<String> = block.text.lines().map(|line| line.to_string()).collect();
-    if insert_at < lines.len() && !lines[insert_at].trim().is_empty() {
-        chunk.push(String::new());
+fn insert_block_before(
+    lines: &mut Vec<std::borrow::Cow<'_, str>>,
+    insert_at: usize,
+    block: &OrphanCommentBlock,
+) {
+    let mut chunk: Vec<std::borrow::Cow<'_, str>> = block
+        .text
+        .lines()
+        .map(|line| std::borrow::Cow::Owned(line.to_string()))
+        .collect();
+    if insert_at < lines.len() && !lines[insert_at].as_ref().trim().is_empty() {
+        chunk.push(std::borrow::Cow::Borrowed(""));
     }
     lines.splice(insert_at..insert_at, chunk);
 }
 
-fn insert_block_after(lines: &mut Vec<String>, insert_at: usize, block: &OrphanCommentBlock) {
-    let mut chunk: Vec<String> = Vec::new();
-    if insert_at > 0 && !lines[insert_at - 1].trim().is_empty() {
-        chunk.push(String::new());
+fn insert_block_after(
+    lines: &mut Vec<std::borrow::Cow<'_, str>>,
+    insert_at: usize,
+    block: &OrphanCommentBlock,
+) {
+    let mut chunk: Vec<std::borrow::Cow<'_, str>> = Vec::new();
+    if insert_at > 0 && !lines[insert_at - 1].as_ref().trim().is_empty() {
+        chunk.push(std::borrow::Cow::Borrowed(""));
     }
-    chunk.extend(block.text.lines().map(|line| line.to_string()));
-    chunk.push(String::new());
+    chunk.extend(
+        block
+            .text
+            .lines()
+            .map(|line| std::borrow::Cow::Owned(line.to_string())),
+    );
+    chunk.push(std::borrow::Cow::Borrowed(""));
     lines.splice(insert_at..insert_at, chunk);
 }
 
