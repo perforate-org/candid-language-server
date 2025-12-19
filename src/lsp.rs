@@ -109,6 +109,7 @@ impl LanguageServer for CandidLanguageServer {
                 ),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                references_provider: Some(OneOf::Left(true)),
                 document_formatting_provider: Some(OneOf::Left(true)),
                 ..ServerCapabilities::default()
             },
@@ -327,6 +328,69 @@ impl LanguageServer for CandidLanguageServer {
             }
         }
         result
+    }
+
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        let request_uri = params.text_document_position.text_document.uri.clone();
+        let position = params.text_document_position.position;
+        let request_uri_label = request_uri.to_string();
+        self.log_info_event(
+            "references",
+            format!(
+                "uri={} line={} character={}",
+                request_uri_label, position.line, position.character
+            ),
+        )
+        .await;
+        let response = (|| {
+            let uri = params.text_document_position.text_document.uri;
+            let uri_key = uri.to_string();
+            let analysis = self.analysis_map.get(&uri_key)?;
+            let document = self.documents.get(&uri_key)?;
+            let semantic = analysis.semantic()?;
+            let rope = document.rope();
+            let version = document.version();
+            let offset = self.cached_position_to_offset(&uri_key, position, rope, version)?;
+
+            let info = lookup_identifier(semantic, offset)?;
+            let symbol_id = info.symbol_id?;
+            let mut locations = Vec::new();
+
+            if params.context.include_declaration
+                && let Some(definition_span) = info.definition_span
+                && let Some(range) = span_to_range(&definition_span, rope)
+            {
+                locations.push(Location::new(uri.clone(), range));
+            }
+
+            if let Some(reference_ids) = semantic.table.symbol_id_to_references.get(&symbol_id) {
+                for reference_id in reference_ids {
+                    if let Some(reference) =
+                        semantic.table.reference_id_to_reference.get(*reference_id)
+                        && let Some(range) = span_to_range(&reference.span, rope)
+                    {
+                        locations.push(Location::new(uri.clone(), range));
+                    }
+                }
+            }
+
+            if locations.is_empty() {
+                None
+            } else {
+                Some(locations)
+            }
+        })();
+        self.log_info_event(
+            "references_result",
+            format!(
+                "uri={} found={}",
+                request_uri_label,
+                response.as_ref().is_some_and(|l| !l.is_empty())
+            ),
+        )
+        .await;
+
+        Ok(response)
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
