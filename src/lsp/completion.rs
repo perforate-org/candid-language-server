@@ -1056,12 +1056,12 @@ fn contains_keyword(text: &str, keyword: &str) -> bool {
 }
 
 fn primitive_completion_items() -> impl Iterator<Item = CompletionItem> {
-    primitive_kinds().iter().cloned().map(|kind| {
+    primitive_kinds().iter().map(|kind| {
         build_completion_item(
-            primitive_name(&kind),
+            primitive_name(kind),
             CompletionItemKind::STRUCT,
             Some("primitive type"),
-            Some(primitive_doc(&kind)),
+            Some(primitive_doc(kind)),
         )
     })
 }
