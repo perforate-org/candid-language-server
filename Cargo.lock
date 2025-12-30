@@ -216,7 +216,7 @@ dependencies = [
 
 [[package]]
 name = "candid-language-server"
-version = "0.0.1-experimental.6"
+version = "0.0.1-experimental.9"
 dependencies = [
  "anyhow",
  "candid_parser",
